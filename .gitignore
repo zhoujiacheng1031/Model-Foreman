@@ -1,0 +1,34 @@
+node_modules/
+out/
+dist/
+release/
+*.log
+.DS_Store
+coverage/
+*.db
+*.db-shm
+*.db-wal
+
+# Local credentials and signing material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+
+# Model Foreman local state and generated pet QA artifacts
+.foreman/
+.pet-runs/
+
+# Website-only caches, local deployment state and nested repository metadata
+website/.git/
+website/node_modules/
+website/.next/
+website/.vinext/
+website/dist/
+website/.wrangler/
+website/outputs/
+website/work/

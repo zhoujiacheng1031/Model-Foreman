@@ -1,0 +1,92 @@
+{
+  "name": "model-foreman",
+  "version": "0.5.5",
+  "private": true,
+  "description": "Local-first multi-model planning, implementation, and review workbench",
+  "author": "Model Foreman",
+  "main": "out/main/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "package": "npm run build && electron-builder --dir",
+    "dist:mac": "npm run build && electron-builder --mac dmg",
+    "dist:mac:adhoc": "npm run build && node scripts/build-adhoc-macos-release.mjs",
+    "dist:win": "npm run build && electron-builder --win nsis --x64 --publish never",
+    "release:mac": "node scripts/macos-release.mjs",
+    "verify:mac": "node scripts/verify-macos-release.mjs"
+  },
+  "dependencies": {
+    "lucide-react": "^0.536.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "zod": "^4.0.15"
+  },
+  "devDependencies": {
+    "@remotion/cli": "^4.0.509",
+    "@types/node": "^24.2.0",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^4.0.0",
+    "remotion": "^4.0.509",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.1",
+    "vitest": "^3.2.4"
+  },
+  "build": {
+    "appId": "com.modelforeman.app",
+    "productName": "Model Foreman",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "afterPack": "scripts/after-pack.mjs",
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon-line-cat.png",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true
+    },
+    "win": {
+      "icon": "build/icon-line-cat.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Model-Foreman-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Model Foreman",
+      "deleteAppDataOnUninstall": false
+    },
+    "dmg": {
+      "title": "Model Foreman ${version}",
+      "artifactName": "Model-Foreman-${version}-${arch}.${ext}"
+    }
+  }
+}
