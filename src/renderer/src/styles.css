@@ -1145,3 +1145,12 @@ input::placeholder,textarea::placeholder { color:rgba(76,82,98,.48); }
 @media (max-width: 1200px) {
   .memory-body { grid-template-columns:1fr; }
 }
+
+.parallel-agents-settings, .agent-task-panel { padding: 16px; margin: 12px 0; border: 1px solid var(--border, #ddd); border-radius: 12px; }
+.parallel-agents-settings p, .agent-task-panel p { font-size: var(--font-xs); line-height: 1.6; overflow-wrap: anywhere; }
+.parallel-agent-config { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 12px 0; }
+.parallel-agent-config label { display: grid; gap: 4px; min-width: 110px; }
+.parallel-agent-config select { max-width: 220px; }
+.agent-task-panel details { padding: 10px 0; border-top: 1px solid var(--border, #ddd); }
+.agent-task-panel summary { cursor: pointer; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+.agent-task-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; font-size: var(--font-xs); }

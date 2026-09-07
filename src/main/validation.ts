@@ -19,6 +19,7 @@ export const customModelDefinitionSchema = modelDefinitionSchema().extend({
 
 export const appSettingsSchema = z.object({
   workspace: z.string().trim().min(1, '工作目录不能为空'),
+  execution: z.object({ maxParallelAgents: z.number().int().min(1).max(4), agents: z.array(roleSchema).max(4) }).optional(),
   maxReviewLoops: z.number().int().min(0).max(8),
   roles: z.object({ planner: roleSchema, implementer: roleSchema, reviewer: roleSchema }),
   approvals: z.object({

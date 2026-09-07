@@ -23,6 +23,7 @@ export interface RoleConfig {
 
 export interface AppSettings {
   workspace: string
+  execution?: { maxParallelAgents: number; agents: RoleConfig[] }
   maxReviewLoops: number
   roles: Record<RoleKey, RoleConfig>
   memory: MemorySettings
@@ -56,6 +57,7 @@ export interface VerificationSettings { enabled: boolean; commands: string[]; ti
 export type ContractStepStatus = 'pending' | 'approved' | 'completed' | 'blocked'
 export interface ContractStep {
   id: string; title: string; description: string; acceptanceCriteria: string[]
+  dependsOn?: string[]
   files: string[]; verificationCommands: string[]; status: ContractStepStatus
 }
 export interface ExecutionContract {
@@ -77,6 +79,7 @@ export interface MemorySettings {
 }
 
 export interface MemoryEntry {
+  version?: number
   id: string
   workspace: string
   kind: MemoryKind
@@ -157,7 +160,18 @@ export interface RunStageMetric {
   problem?: string
 }
 
+export interface AgentTask {
+  id: string; stepId: string; title: string; config: RoleConfig
+  status: 'pending' | 'running' | 'ready' | 'integrated' | 'interrupted' | 'failed'
+  dependencies: string[]; files: string[]; attempt: number
+  workspace?: string; branch?: string; baseCommit?: string; commit?: string
+  report?: ImplementationReport; error?: string; updatedAt: string
+  memorySnapshot?: { id: string; at: string; headCommit?: string; entries: Array<{ id: string; version?: number; updatedAt: string; sourceCommit?: string }>; text: string }
+}
+
 export interface RunSummary {
+  agentTasks?: AgentTask[]
+  executionPolicy?: { maxParallelAgents: number; agents: RoleConfig[] }
   id: string
   title: string
   objective: string
@@ -393,8 +407,8 @@ export interface ForemanBridge {
   retryRun(runId: string): Promise<RunSummary>
   deleteRun(runId: string): Promise<void>
   listMemories(workspace?: string): Promise<MemoryEntry[]>
-  approveMemory(id: string): Promise<MemoryEntry>
-  rejectMemory(id: string): Promise<MemoryEntry>
+  approveMemory(id: string, expectedVersion?: number): Promise<MemoryEntry>
+  rejectMemory(id: string, expectedVersion?: number): Promise<MemoryEntry>
   forgetMemory(id: string): Promise<void>
   getMemoryStats(workspace?: string): Promise<MemoryStats>
   probeMemory(settings?: AppSettings): Promise<MemoryProviderHealth>

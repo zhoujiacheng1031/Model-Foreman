@@ -1,4 +1,4 @@
-name: Release notarized macOS app
+name: Validate and package desktop release
 
 on:
   workflow_dispatch:
@@ -26,12 +26,42 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run release:mac
+      - name: Build with the available signing mode
+        shell: bash
+        run: |
+          if [[ -n "$CSC_LINK" && -n "$CSC_KEY_PASSWORD" ]]; then
+            npm run release:mac
+          else
+            echo "Building an ad-hoc signed, non-notarized macOS package."
+            npm run typecheck
+            npm test
+            npm run dist:mac:adhoc
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: model-foreman-macos-${{ github.ref_name }}
           path: |
             release/*.dmg
             release/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npx vitest run tests/process-tree.test.ts tests/validation.test.ts tests/role-protocol.test.ts
+      - run: npm run dist:win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: model-foreman-windows-${{ github.ref_name }}
+          path: release/*.exe
           if-no-files-found: error
           retention-days: 14

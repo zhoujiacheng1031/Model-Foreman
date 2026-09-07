@@ -1,10 +1,12 @@
+import { terminateProcessTree } from './process-tree'
+import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import type { ExecuteRequest, ExecuteResult } from './types'
 import { buildCliEnvironment } from './cli-environment'
 import { commandInvocation } from './command-launch'
 
 export abstract class ProcessExecutor {
-  protected readonly children = new Map<string, ChildProcessWithoutNullStreams>()
+  protected readonly children = new Map<string, { runId: string; child: ChildProcessWithoutNullStreams }>()
 
   protected runProcess(command: string, args: string[], request: ExecuteRequest, environment: NodeJS.ProcessEnv = {}): Promise<ExecuteResult> {
     return new Promise((resolve, reject) => {
@@ -16,7 +18,8 @@ export abstract class ProcessExecutor {
         detached: process.platform !== 'win32',
         stdio: ['pipe', 'pipe', 'pipe']
       })
-      this.children.set(request.runId, child)
+      const executionId = request.executionId ?? `${request.runId}:${randomUUID()}`
+      this.children.set(executionId, { runId: request.runId, child })
       let stdout = ''
       let stderr = ''
       let stderrPending = ''
@@ -34,9 +37,9 @@ export abstract class ProcessExecutor {
         stderrPending = lines.pop() ?? ''
         for (const line of lines) if (line) this.emitStderr(request, line)
       })
-      child.on('error', reject)
+      child.on('error', (error) => { this.children.delete(executionId); reject(error) })
       child.on('close', (code) => {
-        this.children.delete(request.runId)
+        this.children.delete(executionId)
         if (stderrPending) this.emitStderr(request, stderrPending)
         const exitCode = code ?? 1
         if (exitCode !== 0) reject(new Error(stderr.trim() || `执行器退出，状态码 ${exitCode}`))
@@ -67,12 +70,10 @@ export abstract class ProcessExecutor {
   }
 
   cancel(runId: string): void {
-    const child = this.children.get(runId)
-    if (!child?.pid) return
-    try {
-      if (process.platform === 'win32') child.kill('SIGTERM')
-      else process.kill(-child.pid, 'SIGTERM')
-    } catch { child.kill('SIGTERM') }
+    for (const { runId: parent, child } of this.children.values()) {
+      if (parent !== runId || !child.pid) continue
+      terminateProcessTree(child)
+    }
   }
 
   protected abstract extractOutput(raw: string): string

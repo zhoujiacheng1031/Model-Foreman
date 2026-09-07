@@ -109,7 +109,7 @@ export default function Home() {
           <h2>代码、密钥与运行证据，<br />始终留在你的机器上。</h2>
           <p>复用本机 Codex CLI 与 Claude Code 登录；自定义 API Key 仅作为执行器环境变量注入，不进入项目仓库或任务日志。</p>
           <div className="mf-actions left">
-            <a className="mf-button mf-button-primary" href="https://github.com/zhoujiacheng1031/Model-Foreman/releases/latest">获取 v0.5.5</a>
+            <a className="mf-button mf-button-primary" href="https://github.com/zhoujiacheng1031/Model-Foreman/releases/latest">获取 v0.5.6</a>
             <a className="mf-button mf-button-secondary" href="https://github.com/zhoujiacheng1031/Model-Foreman">查看源代码</a>
           </div>
         </div>

@@ -1,14 +1,18 @@
 import { z } from 'zod'
+import { validateDependencies } from '../parallel/dependencies'
 import type { ExecutionContract, ImplementationReport, ReviewDecision, RoleKey } from '../../shared/contracts'
 
 const stepSchema = z.object({
   id: z.string().min(1), title: z.string().min(1), description: z.string().min(1),
   acceptanceCriteria: z.array(z.string().min(1)).min(1), files: z.array(z.string()),
+  dependsOn: z.array(z.string().min(1)).optional(),
   verificationCommands: z.array(z.string()), status: z.enum(['pending', 'approved', 'completed', 'blocked']).default('pending')
 })
 export const executionContractSchema = z.object({ version: z.literal(1), summary: z.string().min(1),
   assumptions: z.array(z.string()), risks: z.array(z.string()), steps: z.array(stepSchema).min(1).max(30),
-  confidence: z.number().min(0).max(1).default(0.8) })
+  confidence: z.number().min(0).max(1).default(0.8) }).superRefine((contract, ctx) => {
+  try { validateDependencies(contract.steps) } catch (error) { ctx.addIssue({ code: 'custom', message: String(error) }) }
+})
 export const implementationReportSchema = z.object({ summary: z.string().min(1), filesChanged: z.array(z.string()),
   commandsRun: z.array(z.string()), unresolved: z.array(z.string()) })
 export const reviewDecisionSchema = z.object({ verdict: z.enum(['approved', 'changes_requested', 'blocked']),
@@ -20,7 +24,7 @@ type RoleResult = { planner: ExecutionContract; implementer: ImplementationRepor
 export class RoleProtocol {
   instructions(role: RoleKey): string {
     const shape = role === 'planner'
-      ? '{"version":1,"summary":"...","assumptions":[],"risks":[],"steps":[{"id":"step-1","title":"...","description":"...","acceptanceCriteria":["..."],"files":[],"verificationCommands":[],"status":"pending"}],"confidence":0.0}'
+      ? '{"version":1,"summary":"...","assumptions":[],"risks":[],"steps":[{"id":"step-1","title":"...","description":"...","acceptanceCriteria":["..."],"files":["src/example.ts"],"dependsOn":[],"verificationCommands":[],"status":"pending"}],"confidence":0.0}'
       : role === 'implementer'
         ? '{"summary":"...","filesChanged":[],"commandsRun":[],"unresolved":[]}'
         : '{"verdict":"approved|changes_requested|blocked","summary":"...","findings":[{"severity":"critical|major|minor","title":"...","evidence":"...","requiredChange":"..."}],"confidence":0.0}'

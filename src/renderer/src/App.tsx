@@ -1,3 +1,4 @@
+import { ParallelSettings, AgentTaskPanel } from './parallel-agents'
 import { Fragment, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import {
   Activity, ArrowUp, Bot, Brain, Check, ChevronDown, ChevronRight, CircleStop, Cpu, FolderGit2,
@@ -191,7 +192,7 @@ export function App() {
 
   async function decideMemory(id: string, decision: 'approve' | 'reject') {
     await perform(`memory-${decision}`, async () => {
-      if (decision === 'approve') await window.foreman.approveMemory(id); else await window.foreman.rejectMemory(id)
+      if (decision === 'approve') await window.foreman.approveMemory(id, memories.find((entry) => entry.id === id)?.version); else await window.foreman.rejectMemory(id, memories.find((entry) => entry.id === id)?.version)
       await refreshMemories()
     })
   }
@@ -817,6 +818,7 @@ function Workbench(props: {
             <button className="danger-button" disabled={Boolean(props.busy)} onClick={props.onDelete}><Trash2 size={14} />删除记录与工作区</button>
           </div>
         </div>}
+        {selected && <AgentTaskPanel run={selected} />}
         <button className="run-resource-summary" onClick={() => setRunTab('resources')}>
           <span><Gauge size={17} /><span><b>步骤耗时与资源</b><small>查看每个模型与本地验证步骤的消耗</small></span></span>
           <span className="run-resource-totals"><span><b>{formatDuration(resourceTotals.duration)}</b><small>耗时</small></span><span><b>{formatTokenCount(resourceTotals.tokens)}</b><small>Token</small></span><span><b>${resourceTotals.cost.toFixed(3)}</b><small>费用</small></span><ChevronRight size={15} /></span>
@@ -1190,6 +1192,7 @@ function WorkflowView({ settings, capabilities, agentEnvironment, onChange, onDe
         <div className="memory-settings-head settings-workflow-head"><Workflow size={18}/><div><b>角色与流程</b><span>按规划、执行、审核的协作顺序配置模型、推理强度与专用 Skill。</span></div></div>
         <div className="workflow-heading"><div><span className="eyebrow">ORCHESTRATION GRAPH</span><h2>模型协作链路</h2></div><span className="workflow-legend"><i />只读决策 <i />隔离写入 <i />证据审核</span></div>
         <div className="workflow-policy-strip"><div><RotateCcw size={15} /><span><b>Reviewer 返工循环</b><small>审核要求修改时重新进入执行；达到上限后停止并交给人工决策。</small></span></div><label><span>最大返工轮次</span><input type="number" min="0" max="8" value={settings.maxReviewLoops} onChange={(event) => onChange({ ...settings, maxReviewLoops: Number(event.target.value) })} /></label></div>
+        <ParallelSettings settings={settings} onChange={onChange} />
         <div className="role-flow">
         {(Object.keys(roleMeta) as RoleKey[]).map((role, index) => {
           const meta = roleMeta[role]; const config = settings.roles[role]
@@ -1304,6 +1307,8 @@ function ContractEditor({ contract, busy, onSave }: { contract: import('../../sh
       <div className="contract-step-head"><small>{String(index + 1).padStart(2, '0')}</small><input value={step.title} onChange={(event) => updateStep(index, { title: event.target.value })} /><button className={step.status === 'approved' ? 'merge-button' : 'quiet-button'} onClick={() => updateStep(index, { status: step.status === 'approved' ? 'pending' : 'approved' })}>{step.status === 'approved' ? <><Check size={12} />已批准</> : '批准此步'}</button></div>
       <textarea value={step.description} onChange={(event) => updateStep(index, { description: event.target.value })} />
       <label><span>验收标准（每行一条）</span><textarea value={step.acceptanceCriteria.join('\n')} onChange={(event) => updateStep(index, { acceptanceCriteria: lines(event.target.value) })} /></label>
+      <label><span>步骤 ID：{step.id} · 依赖步骤 ID（每行一个；清空表示独立）</span><textarea value={(step.dependsOn ?? draft.steps.slice(0, index).map((item) => item.id)).join('\n')} onChange={(event) => updateStep(index, { dependsOn: lines(event.target.value) })} /></label>
+      <label><span>允许修改的文件或目录（每行一个；留空将独占执行）</span><textarea value={step.files.join('\n')} onChange={(event) => updateStep(index, { files: lines(event.target.value) })} /></label>
       <label><span>验证命令（每行一条）</span><textarea value={step.verificationCommands.join('\n')} onChange={(event) => updateStep(index, { verificationCommands: lines(event.target.value) })} /></label>
     </article>)}</div>
   </section>

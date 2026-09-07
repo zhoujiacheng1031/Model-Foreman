@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import type { AgentTask } from '../shared/contracts'
+import { ParallelRunner } from './parallel/parallel-runner'
 import type { AppSettings, ExecutionContract, ImplementationReport, ReviewDecision, RoleKey, RunCommand, RunEvent, RunStageMetric, RunStatus, RunSummary, TaskInput, VerificationReport } from '../shared/contracts'
 import { ExecutorRegistry } from './executors/registry'
 import { ForemanDatabase } from './storage/database'
@@ -29,7 +31,11 @@ export class Orchestrator {
   ) {}
 
   start(input: TaskInput): RunSummary {
-    const run = this.database.createRun(input)
+    const created = this.database.createRun(input)
+    const settings = this.database.getSettings()
+    const policy = settings.execution ?? { maxParallelAgents: 1, agents: [] }
+    this.database.updateRun(created.id, { executionPolicy: { ...policy, agents: policy.agents.length ? policy.agents : [settings.roles.implementer] } })
+    const run = this.requireRun(created.id)
     this.launch(run.id, () => this.plan(run))
     return run
   }
@@ -100,7 +106,7 @@ export class Orchestrator {
   async pause(runId: string): Promise<void> {
     const run = this.database.getRun(runId)?.run
     if (!run || !this.active.has(runId)) throw new Error('任务当前不可暂停')
-    this.paused.add(runId); this.executors.cancel(runId); this.verification.cancel()
+    this.paused.add(runId); this.executors.cancel(runId); this.verification.cancel(runId)
     this.database.updateRun(runId, { checkpointPhase: run.status, status: 'paused', pauseReason: 'user', error: '任务已由用户中止；当前 worktree 和检查点已保留。' })
     this.emit(runId, 'paused', 'status', `任务已暂停，检查点位于 ${run.status}`)
     const started = Date.now()
@@ -126,13 +132,16 @@ export class Orchestrator {
     if (this.active.has(runId)) this.cancelled.add(runId)
     this.paused.delete(runId)
     this.executors.cancel(runId)
+    this.verification.cancel(runId)
     this.database.updateRun(runId, { status: 'cancelled' })
     this.emit(runId, 'cancelled', 'status', '任务已取消')
   }
 
   shutdown(): void {
     for (const runId of this.active) {
+      this.paused.add(runId)
       this.executors.cancel(runId)
+      this.verification.cancel(runId)
       this.database.updateRun(runId, {
         checkpointPhase: this.database.getRun(runId)?.run.status, status: 'paused', pauseReason: 'interrupted', error: '应用退出，活动执行器已终止；可从检查点恢复。'
       })
@@ -171,7 +180,7 @@ export class Orchestrator {
     const contract = run.contract!
     const resumePhase = run.checkpointPhase
     const canResumeEvidence = ['verifying', 'reviewing'].includes(resumePhase ?? '') && run.implementationReport
-    let implementationReport = canResumeEvidence ? run.implementationReport! : await this.runStructuredRole('implementer', run, settings, this.implementerPrompt(run, contract))
+    let implementationReport = canResumeEvidence ? run.implementationReport! : await this.runImplementation(run, settings)
     if (canResumeEvidence) this.database.updateRun(run.id, { status: resumePhase === 'reviewing' ? 'reviewing' : 'verifying' })
       this.assertActive(run.id)
       this.database.updateRun(run.id, { implementationReport, result: JSON.stringify(implementationReport, null, 2) })
@@ -189,7 +198,7 @@ export class Orchestrator {
           const suggested = contract.steps.flatMap((step) => step.verificationCommands)
           const verificationStartedAt = new Date().toISOString(); const verificationStarted = Date.now()
           try {
-          verification = await this.verification.verify(run.executionWorkspace ?? run.workspace, settings.verification, suggested)
+          verification = await this.verification.verify(run.executionWorkspace ?? run.workspace, settings.verification, suggested, run.id)
           this.recordStageMetric(run.id, {
             stage: 'verifier', label: `独立验证 · 第 ${attempt + 1} 轮`, attempt: attempt + 1, status: verification.status === 'failed' ? 'failed' : 'completed',
             executor: 'foreman-local', startedAt: verificationStartedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - verificationStarted,
@@ -229,15 +238,38 @@ export class Orchestrator {
     }
   }
 
-  private async runRole(role: RoleKey, run: RunSummary, settings: AppSettings, taskPrompt: string): Promise<string> {
+  private async runImplementation(run: RunSummary, settings: AppSettings): Promise<ImplementationReport> {
+    const parallel = run.executionPolicy?.maxParallelAgents ?? 1
+    if (parallel <= 1 || (run.reviewAttempt ?? 0) > 0) return this.runStructuredRole('implementer', run, settings, this.implementerPrompt(run, run.contract!))
     this.assertActive(run.id)
-    const config = settings.roles[role]
-    await this.modelRuntime.ensure(config, run.executionWorkspace ?? run.workspace)
+    this.database.updateRun(run.id, { status: 'implementing', checkpointPhase: 'implementing' })
+    return new ParallelRunner(this.database).execute(run, settings, () => this.assertActive(run.id), async (task, current) => {
+      const step = current.contract!.steps.find((item) => item.id === task.stepId)!
+      const prompt = `任务目标：${run.objective}\n你只负责步骤 ${task.stepId}：${JSON.stringify(step)}\n允许修改范围：${task.files.join('、') || '本隔离工作区'}\n其他 agent 正在独立工作，不要修改其他工作区、切换分支或操作共享服务。只使用本工作区的测试资源；需要共享数据库或端口时先报告阻塞。\n补充要求：${run.additionalInstructions || '无'}\n完成后返回真实改动、命令及未解决事项，Foreman 会汇总后独立验证。`
+      return this.runStructuredRole('implementer', current, settings, prompt, task)
+    }, () => this.executors.cancel(run.id))
+  }
+
+  private async runRole(role: RoleKey, run: RunSummary, settings: AppSettings, taskPrompt: string, agent?: AgentTask): Promise<string> {
+    this.assertActive(run.id)
+    const config = agent?.config ?? settings.roles[role]
+    const workspace = agent?.workspace ?? run.executionWorkspace ?? run.workspace
+    await this.modelRuntime.ensure(config, workspace)
+    this.assertActive(run.id)
+    if (agent && this.requireRun(run.id).agentTasks?.some((task) => task.status === 'failed')) throw new Error('同任务 Agent 已失败，停止启动新进程')
     const phase: RunStatus = role === 'planner' ? 'planning' : role === 'reviewer' ? 'reviewing' : 'implementing'
     this.database.updateRun(run.id, { status: phase })
     this.emit(run.id, phase, 'status', `${roleLabel(role)} · ${config.executor} / ${config.model} / ${config.effort}`)
-    const packet = await this.memory.prepare({ workspace: run.workspace, objective: run.objective, role }, settings)
+    const packet = await this.memory.prepare({ workspace: run.workspace, objective: run.objective, role, headCommit: agent?.baseCommit, executionWorkspace: workspace }, settings)
+    for (const warning of packet.warnings ?? []) this.emit(run.id, phase, 'status', warning)
     if (packet.entries.length) this.emit(run.id, phase, 'status', `已为${roleLabel(role)}召回 ${packet.entries.length} 条已批准记忆`)
+    const working = agent ? (this.requireRun(run.id).agentTasks ?? []).filter((task) => task.id === agent.id || (agent.dependencies.includes(task.stepId) && task.status === 'integrated'))
+      .map((task) => ({ agentId: task.id, stepId: task.stepId, status: task.status, commit: task.commit, report: task.report, error: task.error })) : []
+    const contextText = packet.text + (working.length ? `\n<task_working_memory>以下仅是本任务的过程记录，不是项目已验证事实：${JSON.stringify(working).slice(0, 12000)}</task_working_memory>` : '')
+    if (agent) this.database.updateRun(run.id, { agentTasks: this.requireRun(run.id).agentTasks!.map((task) => task.id === agent.id ? { ...task,
+      memorySnapshot: { id: randomUUID(), at: new Date().toISOString(), headCommit: agent.baseCommit, entries: packet.entries.map((entry) => ({ id: entry.id, version: entry.version, updatedAt: entry.updatedAt, sourceCommit: entry.sourceCommit })), text: contextText } } : task) })
+    this.assertActive(run.id)
+    if (agent && this.requireRun(run.id).agentTasks?.some((task) => task.status === 'failed')) throw new Error('同任务 Agent 已失败，停止启动新进程')
     const executor = this.executors.get(config.executor)
     const skillPrompt = config.skillMode === 'explicit' && config.skills.length
       ? `\n\n本角色必须使用以下已配置 Skill：${config.skills.join('、')}。先读取并遵循它们的完整说明；若某项不可用，请明确报告，不要静默替代。`
@@ -246,9 +278,9 @@ export class Orchestrator {
     const startedAt = new Date().toISOString(); const started = Date.now()
     try {
       const result = await executor.execute({
-        runId: run.id, role, model: config.model, effort: config.effort,
-        workspace: run.executionWorkspace ?? run.workspace, prompt: `${config.prompt}${skillPrompt}${packet.text}\n\n${taskPrompt}`,
-        emit: (event) => this.persistAndSink({ ...event, at: new Date().toISOString() })
+        executionId: agent ? `${agent.id}:${randomUUID()}` : undefined, runId: run.id, role, model: config.model, effort: config.effort,
+        workspace, prompt: `${config.prompt}${skillPrompt}${contextText}\n\n${taskPrompt}`,
+        emit: (event) => this.persistAndSink({ ...event, message: agent ? `[agent:${agent.stepId}:${agent.id}] ${event.message}` : event.message, at: new Date().toISOString() })
       })
       const usage = result.usage ?? { inputTokens: 0, outputTokens: 0, costUsd: 0 }
       if (result.usage) {
@@ -256,7 +288,7 @@ export class Orchestrator {
         this.database.updateRun(run.id,{ usageTokens:(current?.usageTokens??0)+usage.inputTokens+usage.outputTokens,costUsd:(current?.costUsd??0)+(usage.costUsd??0) })
       }
       this.recordStageMetric(run.id, {
-        stage: role, label: `${roleLabel(role)} · 第 ${(this.database.getRun(run.id)?.run.reviewAttempt ?? 0) + 1} 轮`,
+        stage: role, label: `${agent ? `Agent ${agent.stepId}` : roleLabel(role)} · 第 ${(this.database.getRun(run.id)?.run.reviewAttempt ?? 0) + 1} 轮`,
         attempt: (this.database.getRun(run.id)?.run.reviewAttempt ?? 0) + 1, status: 'completed', executor: config.executor, model: config.model,
         startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - started, inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens, costUsd: usage.costUsd ?? 0, resourceDetail: `${config.effort} · ${packet.entries.length} 条记忆 · ${config.skills.length} 个指定 Skill`
@@ -265,7 +297,7 @@ export class Orchestrator {
     } catch (error) {
       const problem = error instanceof Error ? error.message : String(error)
       this.recordStageMetric(run.id, {
-        stage: role, label: `${roleLabel(role)} · 第 ${(this.database.getRun(run.id)?.run.reviewAttempt ?? 0) + 1} 轮`,
+        stage: role, label: `${agent ? `Agent ${agent.stepId}` : roleLabel(role)} · 第 ${(this.database.getRun(run.id)?.run.reviewAttempt ?? 0) + 1} 轮`,
         attempt: (this.database.getRun(run.id)?.run.reviewAttempt ?? 0) + 1, status: 'failed', executor: config.executor, model: config.model,
         startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - started, inputTokens: 0, outputTokens: 0, costUsd: 0, resourceDetail: `${config.effort} · 执行异常终止`, problem
       })
@@ -277,14 +309,14 @@ export class Orchestrator {
     this.database.addStageMetric(runId, { id: randomUUID(), ...metric })
   }
 
-  private async runStructuredRole<R extends RoleKey>(role: R, run: RunSummary, settings: AppSettings, taskPrompt: string): Promise<R extends 'planner' ? ExecutionContract : R extends 'implementer' ? ImplementationReport : ReviewDecision> {
-    const first = await this.runRole(role, run, settings, `${taskPrompt}${this.protocol.instructions(role)}`)
+  private async runStructuredRole<R extends RoleKey>(role: R, run: RunSummary, settings: AppSettings, taskPrompt: string, agent?: AgentTask): Promise<R extends 'planner' ? ExecutionContract : R extends 'implementer' ? ImplementationReport : ReviewDecision> {
+    const first = await this.runRole(role, run, settings, `${taskPrompt}${this.protocol.instructions(role)}`, agent)
     this.assertActive(run.id)
     try { return this.protocol.decode(role, first) as never }
     catch (error) {
       this.assertActive(run.id)
       this.emit(run.id, role === 'planner' ? 'planning' : role === 'reviewer' ? 'reviewing' : 'implementing', 'stderr', '模型输出协议无效，正在请求一次格式修复')
-      const repaired = await this.runRole(role, run, settings, this.protocol.repairPrompt(role, first, error))
+      const repaired = await this.runRole(role, run, settings, this.protocol.repairPrompt(role, first, error), agent)
       this.assertActive(run.id)
       return this.protocol.decode(role, repaired) as never
     }
@@ -362,7 +394,7 @@ export class Orchestrator {
   }
 
   private plannerPrompt(run: RunSummary) {
-    return `任务标题：${run.title}\n任务目标：${run.objective}\n隔离工作目录：${run.executionWorkspace ?? run.workspace}\n分支：${run.branch ?? '未创建'}\n补充意见：${run.additionalInstructions || '无'}\n请先检查仓库现状，再制定计划。`
+    return `任务标题：${run.title}\n任务目标：${run.objective}\n隔离工作目录：${run.executionWorkspace ?? run.workspace}\n分支：${run.branch ?? '未创建'}\n补充意见：${run.additionalInstructions || '无'}\n请先检查仓库现状，再制定计划。每步声明明确的仓库内文件或目录 files，以及依赖步骤 ID dependsOn；独立步骤用 []，有前后依赖必须列出，不能为追求并行省略逻辑或共享资源依赖。`
   }
 
   private async ensureConfiguredModels(runId: string, settings: AppSettings, workspace: string): Promise<void> {

@@ -1,6 +1,7 @@
 import type { Effort, ExecutorKind, RoleKey, RunEvent } from '../../shared/contracts'
 
 export interface ExecuteRequest {
+  executionId?: string
   runId: string
   role: RoleKey
   model: string

@@ -18,16 +18,21 @@ describe('ForemanDatabase migration', () => {
       CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,at TEXT NOT NULL,phase TEXT NOT NULL,kind TEXT NOT NULL,message TEXT NOT NULL);
       CREATE TABLE memories (id TEXT PRIMARY KEY,workspace TEXT NOT NULL,kind TEXT NOT NULL,title TEXT NOT NULL,content TEXT NOT NULL,status TEXT NOT NULL,confidence REAL NOT NULL,source_run_id TEXT,source_commit TEXT,source_ref TEXT,supersedes_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,valid_until TEXT,usage_count INTEGER NOT NULL DEFAULT 0);
     `)
-    const old = defaultSettings('/repo') as Partial<ReturnType<typeof defaultSettings>> & { verification?: unknown }; delete old.verification
+    const old = defaultSettings('/repo') as Partial<ReturnType<typeof defaultSettings>> & { verification?: unknown }; delete old.verification; delete old.execution
     for (const role of Object.values(old.roles!)) { delete (role as Partial<typeof role>).skillMode; delete (role as Partial<typeof role>).skills }
     legacy.prepare('INSERT INTO settings(key,value) VALUES (?,?)').run('app', JSON.stringify(old)); legacy.close()
 
     const migrated = new ForemanDatabase(path, '/repo')
 
     expect(migrated.getSettings().verification.enabled).toBe(true)
+    expect(migrated.getSettings().execution?.maxParallelAgents).toBe(1)
     expect(migrated.getSettings().roles.planner).toMatchObject({ skillMode: 'auto', skills: [] })
     const memory = migrated.createMemory({ workspace: '/repo', kind: 'fact', title: '事实', content: '迁移后仍可写入', status: 'approved', confidence: .8, sourceFiles: ['src/a.ts'] })
     expect(memory.sourceFiles).toEqual(['src/a.ts'])
+    expect(memory.version).toBe(1)
+    const run = migrated.createRun({ title: '旧任务', objective: '保留串行', workspace: '/repo' })
+    expect(migrated.getRun(run.id)?.run.agentTasks).toEqual([])
+    expect(migrated.getRun(run.id)?.run.executionPolicy).toBeUndefined()
     const goal = migrated.createGoal({ title:'升级', objective:'完成升级', workspace:'/repo', successCriteria:['测试通过'], constraints:[], priority:1, maxIterations:4, maxTaskAttempts:2 }, 'fingerprint')
     expect(goal.tasks).toHaveLength(1)
     expect(goal.goal.workspaceFingerprint).toBe('fingerprint')

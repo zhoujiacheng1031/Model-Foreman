@@ -5,6 +5,7 @@ import { promisify } from 'node:util'
 import type { RunSummary } from '../../shared/contracts'
 import type { PreparedWorkspace, WorkspaceDeliveryState, WorkspaceManager } from './types'
 import { ensureWorkspaceBaseline } from './bootstrap'
+import { AgentWorkspaces } from '../parallel/agent-workspaces'
 
 const execFileAsync = promisify(execFile)
 
@@ -60,7 +61,7 @@ export class GitWorktreeManager implements WorkspaceManager {
     const commit = (await this.git(path, ['rev-parse', 'HEAD'])).trim()
     await this.git(repository, ['merge', '--ff-only', branch])
     let cleanupWarning: string | undefined
-    try { await this.cleanup(repository, path, branch, false) }
+    try { await new AgentWorkspaces().cleanup(run, false); await this.cleanup(repository, path, branch, false) }
     catch (error) { cleanupWarning = cleanupMessage(error) }
     return { commit, cleanupWarning }
   }
@@ -118,12 +119,14 @@ export class GitWorktreeManager implements WorkspaceManager {
   }
 
   async cleanupMerged(run: RunSummary): Promise<void> {
+    await new AgentWorkspaces().cleanup(run, false)
     const { path, branch } = await this.managed(run)
     const repository = (await this.git(run.workspace, ['rev-parse', '--show-toplevel'])).trim()
     await this.cleanup(repository, path, branch, false)
   }
 
   async discard(run: RunSummary) {
+    await new AgentWorkspaces().cleanup(run, true)
     const { path, branch } = await this.managed(run)
     const repository = (await this.git(run.workspace, ['rev-parse', '--show-toplevel'])).trim()
     await this.cleanup(repository, path, branch, true)

@@ -15,7 +15,7 @@
   <a href="https://github.com/zhoujiacheng1031/Model-Foreman/releases/latest">下载安装</a>
 </p>
 
-<p align="center"><strong>v0.5.5</strong> · macOS Apple Silicon · Windows x64</p>
+<p align="center"><strong>v0.5.6</strong> · macOS Apple Silicon · Windows x64</p>
 
 ![Model Foreman 工作台](website/public/product-workbench.png)
 
@@ -95,3 +95,9 @@ macOS 对外发布需要签名与公证；完整说明见 [macOS 签名与公证
 - [TencentDB Agent Memory 评估](docs/research/tencentdb-agent-memory-evaluation.md)
 
 Model Foreman 仍在持续迭代。欢迎通过 [Issues](https://github.com/zhoujiacheng1031/Model-Foreman/issues) 提交问题与建议。
+
+### 并行 Agent 与记忆治理
+
+设置中可为新任务启用 2–4 个并行执行 Agent，混合使用 Codex、Claude Code 和已有自定义 API 适配器。Foreman 按批准步骤的依赖与文件范围分配独立 worktree，串行汇总后统一验证与审核，并保存各 Agent 的工作记忆快照。默认与历史任务继续串行。
+
+使用步骤、恢复行为、来源审批及当前能力边界见 [并行执行与记忆治理](docs/architecture/parallel-agents-memory.md)。

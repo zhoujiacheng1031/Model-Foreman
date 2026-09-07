@@ -7,7 +7,7 @@ export const metadata: Metadata = {
 };
 
 const steps = [
-  { id: "prepare", index: "01", title: "准备本机环境", summary: "安装应用和至少一种执行器。", body: <>Model Foreman 0.5.5 支持 Apple Silicon Mac 与 Windows x64。准备一个已有 Git 仓库，或直接准备一个全新空文件夹；再安装并登录 <b>Codex CLI</b>、<b>Claude Code</b>，也可以在设置中接入兼容 API。Desktop 应用不是后台执行的必需项，但安装后可随时人工接管。</> },
+  { id: "prepare", index: "01", title: "准备本机环境", summary: "安装应用和至少一种执行器。", body: <>Model Foreman 0.5.6 支持 Apple Silicon Mac 与 Windows x64。准备一个已有 Git 仓库，或直接准备一个全新空文件夹；再安装并登录 <b>Codex CLI</b>、<b>Claude Code</b>，也可以在设置中接入兼容 API。Desktop 应用不是后台执行的必需项，但安装后可随时人工接管。</> },
   { id: "workspace", index: "02", title: "打开项目，监控交付状态", summary: "既可连接已有仓库，也可从空文件夹启动首个任务。", body: <>进入“工作台”的“项目与交付”，选择已有 Git 仓库，或在系统文件夹选择器中新建空文件夹。空项目的首个任务会自动初始化 <code>main</code> 和不包含任何文件的本地基线，再创建隔离 worktree；如果文件夹已有文件却没有 Git 基线，Foreman 会要求你先人工检查和提交，绝不会静默导入。连接 GitHub remote 后，还可按界面引导安装、登录 <b>GitHub CLI（gh）</b>，每 30 秒只读刷新 PR、Review、Checks 与近期 Actions。</> },
   { id: "skills", index: "03", title: "配置角色、模型与 Skills", summary: "三个角色分别选择执行器、模型和本轮必用 Skill。", body: <>前往“设置 → 角色与流程”。Planner、Implementer 与 Reviewer 可分别使用 Codex、Claude 或自定义 API；自定义模型支持 OpenAI Responses 与 Anthropic Messages 兼容协议，完整填写 URL、API Key 和模型名称后先点击“检测连接”。每个角色的 Skills 可交给模型自动匹配，也可勾选本轮指定必用项。</> },
   { id: "first-run", index: "04", title: "发起第一项任务", summary: "描述结果，并观察每一步真实消耗。", body: <>回到工作台，写清最终结果和约束。Planner 会先生成可编辑的执行合同；检查步骤、文件、验收标准与验证命令，逐步批准后 Implementer 才会开始修改代码。“步骤耗时与资源”会分别记录 Planner、Implementer、Verifier、Reviewer 及返工调用的耗时、模型、输入 / 输出 Token、费用、记忆与 Skill；CLI 没有报告的数据会显示 0，不做估算。</> },

@@ -5,6 +5,7 @@ import type { AppSettings, ExecutionContract, ExecutorKind, GoalDetail, GoalEvid
 export const defaultSettings = (workspace: string): AppSettings => ({
   workspace,
   maxReviewLoops: 2,
+  execution: { maxParallelAgents: 1, agents: [] },
   memory: {
     enabled: true, provider: 'local', maxItems: 6, maxChars: 6000, requireApproval: true,
     tencentdb: { endpoint: 'http://127.0.0.1:8420', serviceId: 'default', teamId: '', agentId: '', userId: '', gatewayTokenEnv: 'TDAI_GATEWAY_TOKEN', userKeyEnv: 'TDAI_USER_KEY' }
@@ -108,10 +109,14 @@ export class ForemanDatabase {
     this.ensureColumn('cost_usd', 'REAL')
     this.ensureColumn('stage_metrics', "TEXT NOT NULL DEFAULT '[]'")
     this.ensureColumn('pause_reason', 'TEXT')
+    this.ensureColumn('agent_tasks', "TEXT NOT NULL DEFAULT '[]'")
+    this.ensureColumn('execution_policy', 'TEXT')
     this.ensureGoalColumn('token_budget', 'INTEGER')
     this.ensureGoalColumn('cost_budget_usd', 'REAL')
     this.ensureGoalTaskColumn('run_history', "TEXT NOT NULL DEFAULT '[]'")
     this.ensureMemoryColumn('source_files', "TEXT NOT NULL DEFAULT '[]'")
+    this.ensureMemoryColumn('version', 'INTEGER NOT NULL DEFAULT 1')
+    this.db.exec('CREATE TABLE IF NOT EXISTS memory_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, memory_id TEXT NOT NULL, from_status TEXT NOT NULL, to_status TEXT NOT NULL, version INTEGER NOT NULL, at TEXT NOT NULL)')
     this.db.exec(`UPDATE runs SET resolution = 'open' WHERE resolution IS NULL`)
     if (!this.db.prepare('SELECT 1 FROM settings WHERE key = ?').get('app')) {
       this.saveSettings(defaultSettings(workspace))
@@ -153,11 +158,11 @@ export class ForemanDatabase {
     return run
   }
 
-  updateRun(id: string, fields: Partial<Pick<RunSummary, 'status' | 'plan' | 'result' | 'review' | 'error' | 'executionWorkspace' | 'branch' | 'baseCommit' | 'isolated' | 'resolution' | 'contract' | 'implementationReport' | 'reviewDecision' | 'verification' | 'checkpointPhase' | 'pauseReason' | 'additionalInstructions' | 'reviewAttempt' | 'usageTokens' | 'costUsd' | 'stageMetrics'>>): void {
+  updateRun(id: string, fields: Partial<Pick<RunSummary, 'status' | 'plan' | 'result' | 'review' | 'error' | 'executionWorkspace' | 'branch' | 'baseCommit' | 'isolated' | 'resolution' | 'contract' | 'implementationReport' | 'reviewDecision' | 'verification' | 'checkpointPhase' | 'pauseReason' | 'additionalInstructions' | 'reviewAttempt' | 'usageTokens' | 'costUsd' | 'stageMetrics' | 'agentTasks' | 'executionPolicy'>>): void {
     const entries = Object.entries(fields).filter(([, value]) => value !== undefined)
     if (!entries.length) return
     const columns: Record<string, string> = {
-      status: 'status', plan: 'plan', result: 'result', review: 'review', error: 'error',
+      agentTasks: 'agent_tasks', executionPolicy: 'execution_policy', status: 'status', plan: 'plan', result: 'result', review: 'review', error: 'error',
       executionWorkspace: 'execution_workspace', branch: 'branch', baseCommit: 'base_commit',
       isolated: 'isolated', resolution: 'resolution', contract: 'contract', implementationReport: 'implementation_report',
       reviewDecision: 'review_decision', verification: 'verification', checkpointPhase: 'checkpoint_phase', pauseReason: 'pause_reason', additionalInstructions: 'additional_instructions', reviewAttempt: 'review_attempt', usageTokens:'usage_tokens',costUsd:'cost_usd',stageMetrics:'stage_metrics'
@@ -277,8 +282,8 @@ export class ForemanDatabase {
   }
 
   searchMemories(workspace: string, kinds: MemoryKind[], query: string, limit: number): MemoryEntry[] {
-    this.db.prepare(`UPDATE memories SET status='expired', updated_at=? WHERE status='approved' AND valid_until IS NOT NULL AND valid_until <= ?`)
-      .run(new Date().toISOString(), new Date().toISOString())
+    const expired = this.db.prepare("SELECT id FROM memories WHERE status='approved' AND valid_until IS NOT NULL AND valid_until <= ?").all(new Date().toISOString()) as Array<{ id: string }>
+    for (const row of expired) this.updateMemoryStatus(row.id, 'expired')
     const terms = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}_-]{2,}/gu) ?? [])].slice(0, 12)
     let rows: MemoryRow[]
     if (terms.length) {
@@ -297,16 +302,35 @@ export class ForemanDatabase {
   }
 
   latestApprovedMemory(workspace: string, kind: MemoryKind, title: string): MemoryEntry | null {
-    const row = this.db.prepare(`SELECT * FROM memories WHERE workspace=? AND kind=? AND title=? AND status='approved' ORDER BY updated_at DESC LIMIT 1`)
+    const row = this.db.prepare(`SELECT * FROM memories WHERE workspace=? AND kind=? AND title=? AND status IN ('approved','needs_revalidation') ORDER BY updated_at DESC LIMIT 1`)
       .get(workspace, kind, title) as MemoryRow | undefined
     return row ? mapMemory(row) : null
   }
 
-  updateMemoryStatus(id: string, status: MemoryStatus): MemoryEntry {
-    this.db.prepare('UPDATE memories SET status=?, updated_at=? WHERE id=?').run(status, new Date().toISOString(), id)
-    const memory = this.getMemory(id); if (!memory) throw new Error('记忆不存在')
-    if (status === 'approved' && memory.supersedesId) this.updateMemoryStatus(memory.supersedesId, 'superseded')
-    return memory
+  updateMemoryStatus(id: string, status: MemoryStatus, expectedVersion?: number): MemoryEntry {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const memory = this.getMemory(id)
+      if (!memory) throw new Error('记忆不存在')
+      if (expectedVersion !== undefined && memory.version !== expectedVersion) throw new Error('记忆已被更新，请刷新后再决定')
+      if (status === 'approved' && !['candidate', 'needs_revalidation', 'approved'].includes(memory.status)) throw new Error('当前记忆状态不能直接批准')
+      if (memory.status !== status) {
+        const change = (entry: MemoryEntry, next: MemoryStatus) => {
+          const now = new Date().toISOString()
+          this.db.prepare('UPDATE memories SET status=?, version=version+1, updated_at=? WHERE id=?').run(next, now, entry.id)
+          this.db.prepare('INSERT INTO memory_audit(memory_id,from_status,to_status,version,at) VALUES (?,?,?,?,?)').run(entry.id, entry.status, next, (entry.version ?? 1) + 1, now)
+        }
+        if (status === 'approved' && memory.supersedesId) {
+          const previous = this.getMemory(memory.supersedesId)
+          if (!previous || previous.workspace !== memory.workspace || previous.id === id || !['approved', 'needs_revalidation'].includes(previous.status)) throw new Error('被替代的记忆已变更，请重新评估候选')
+          change(previous, 'superseded')
+        }
+        change(memory, status)
+      }
+      const updated = this.getMemory(id)!
+      this.db.exec('COMMIT')
+      return updated
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
   }
 
   incrementMemoryUsage(ids: string[]): void {
@@ -316,7 +340,7 @@ export class ForemanDatabase {
 
   invalidateMemories(workspace: string, changedFiles: string[], newCommit: string): number {
     if (!changedFiles.length) return 0
-    const rows = this.listMemories(workspace).filter((entry) => entry.status === 'approved' && entry.sourceCommit !== newCommit && entry.sourceFiles.some((file) => changedFiles.includes(file)))
+    const rows = this.listMemories(workspace).filter((entry) => entry.status === 'approved' && entry.sourceCommit !== newCommit && entry.sourceFiles.some((file) => changedFiles.some((changed) => file === changed || changed.startsWith(`${file.replace(/\/$/, '')}/`) || file.startsWith(`${changed}/`))))
     for (const row of rows) this.updateMemoryStatus(row.id, 'needs_revalidation')
     return rows.length
   }
@@ -354,6 +378,7 @@ function mergeModelCatalog(defaults: AppSettings['models'][ExecutorKind], saved?
 interface RunRow {
   id: string; title: string; objective: string; workspace: string; status: RunStatus
   created_at: string; updated_at: string; plan?: string; result?: string; review?: string; error?: string
+  agent_tasks?: string; execution_policy?: string
   execution_workspace?: string; branch?: string; isolated?: number
   base_commit?: string; resolution?: RunSummary['resolution']
   contract?: string; implementation_report?: string; review_decision?: string; verification?: string
@@ -363,6 +388,7 @@ interface GoalRow { id:string; title:string; objective:string; workspace:string;
 interface GoalTaskRow { id:string; goal_id:string; title:string; objective:string; status:GoalTaskStatus; dependencies:string; order_index:number; attempt:number; max_attempts:number; run_id?:string; run_history:string; evidence?:string; created_at:string; updated_at:string }
 interface EventRow { id: number; run_id: string; at: string; phase: RunStatus; kind: RunEvent['kind']; message: string }
 interface MemoryRow {
+  version?: number
   id: string; workspace: string; kind: MemoryKind; title: string; content: string; status: MemoryStatus; confidence: number
   source_run_id?: string; source_commit?: string; source_ref?: string; supersedes_id?: string
   created_at: string; updated_at: string; valid_until?: string; usage_count: number
@@ -371,6 +397,7 @@ interface MemoryRow {
 
 function mapRun(row: RunRow): RunSummary {
   return {
+    agentTasks: parseJson<RunSummary['agentTasks']>(row.agent_tasks) ?? [], executionPolicy: parseJson<RunSummary['executionPolicy']>(row.execution_policy),
     id: row.id, title: row.title, objective: row.objective, workspace: row.workspace,
     status: row.status, createdAt: row.created_at, updatedAt: row.updated_at,
     executionWorkspace: row.execution_workspace ?? undefined,
@@ -390,7 +417,7 @@ function mapGoalTask(row: GoalTaskRow): GoalTask { return { id:row.id,goalId:row
 function parseJson<T>(value?: string): T | undefined { if (!value) return undefined; try { return JSON.parse(value) as T } catch { return undefined } }
 
 function mapMemory(row: MemoryRow): MemoryEntry {
-  return { id: row.id, workspace: row.workspace, kind: row.kind, title: row.title, content: row.content,
+  return { version: row.version ?? 1, id: row.id, workspace: row.workspace, kind: row.kind, title: row.title, content: row.content,
     status: row.status, confidence: row.confidence, sourceRunId: row.source_run_id ?? undefined,
     sourceCommit: row.source_commit ?? undefined, sourceRef: row.source_ref ?? undefined,
     supersedesId: row.supersedes_id ?? undefined, sourceFiles: parseJson<string[]>(row.source_files) ?? [], createdAt: row.created_at, updatedAt: row.updated_at,

@@ -6,6 +6,39 @@ import { ForemanDatabase, defaultSettings } from '../src/main/storage/database'
 describe('ForemanMemoryModule', () => {
   afterEach(() => { vi.unstubAllGlobals(); delete process.env.TEST_TDAI_TOKEN })
 
+  it('rejects stale decisions and rolls back cross-project replacement', () => {
+    const db = new ForemanDatabase(':memory:', '/repo')
+    const previous = db.createMemory({ workspace: '/other', kind: 'fact', title: 'old', content: 'other project', status: 'approved', confidence: .9 })
+    const candidate = db.createMemory({ workspace: '/repo', kind: 'fact', title: 'new', content: 'candidate', status: 'candidate', confidence: .9, supersedesId: previous.id })
+    expect(() => db.updateMemoryStatus(candidate.id, 'approved', candidate.version)).toThrow('被替代')
+    expect(db.getMemory(candidate.id)?.status).toBe('candidate')
+    expect(db.getMemory(previous.id)?.status).toBe('approved')
+    const rejected = db.updateMemoryStatus(candidate.id, 'rejected', candidate.version)
+    expect(rejected.version).toBe(candidate.version! + 1)
+    expect(() => db.updateMemoryStatus(candidate.id, 'approved', candidate.version)).toThrow('刷新')
+  })
+
+  it('auto-approval replaces invalidated knowledge through the same versioned transition', async () => {
+    const db = new ForemanDatabase(':memory:', '/repo'); const memory = new ForemanMemoryModule(db)
+    const settings = defaultSettings('/repo'); settings.memory.requireApproval = false
+    const previous = db.createMemory({ workspace: '/repo', kind: 'decision', title: '缓存：交付决策', content: '旧缓存方案', status: 'approved', confidence: .9, sourceFiles: ['src/cache.ts'], sourceCommit: 'old' })
+    const run = db.createRun({ title: '缓存', objective: '更新缓存', workspace: '/repo' })
+    db.updateRun(run.id, { resolution: 'merged', reviewDecision: { verdict: 'approved', summary: '通过', findings: [], confidence: 1 }, contract: contract('新缓存方案', 'src/cache.ts') })
+    const entries = await memory.captureVerifiedOutcome(db.getRun(run.id)!.run, { commit: 'new', changedFiles: ['src/cache.ts'] }, settings)
+    expect(entries.every((entry) => entry.status === 'approved' && entry.version === 2)).toBe(true)
+    expect(db.getMemory(previous.id)?.status).toBe('superseded')
+    expect(db.getMemory(previous.id)?.version).toBe(3)
+  })
+
+  it('does not treat external relevance as project approval and reports omitted hits', async () => {
+    const db = new ForemanDatabase(':memory:', '/repo'); const adapter = new TencentDbMemoryAdapter()
+    vi.spyOn(adapter, 'search').mockResolvedValue([{ id: 'foreign', type: 'fact', content: 'unapproved external fact', score: 1, updatedAt: new Date().toISOString() }])
+    const settings = defaultSettings('/repo'); settings.memory.provider = 'tencentdb'
+    const packet = await new ForemanMemoryModule(db, adapter).prepare({ workspace: '/repo', objective: 'fact', role: 'implementer' }, settings)
+    expect(packet.entries).toEqual([])
+    expect(packet.warnings?.[0]).toContain('未注入')
+  })
+
   it('只从已验证且已合并的任务生成候选', async () => {
     const database = new ForemanDatabase(':memory:', '/repo')
     const memory = new ForemanMemoryModule(database)
