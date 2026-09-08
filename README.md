@@ -15,7 +15,7 @@
   <a href="https://github.com/zhoujiacheng1031/Model-Foreman/releases/latest">下载安装</a>
 </p>
 
-<p align="center"><strong>v0.5.6</strong> · macOS Apple Silicon · Windows x64</p>
+<p align="center"><strong>v0.5.7</strong> · macOS Apple Silicon · Windows x64</p>
 
 ![Model Foreman 工作台](website/public/product-workbench.png)
 

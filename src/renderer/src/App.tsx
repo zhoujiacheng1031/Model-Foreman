@@ -1192,7 +1192,6 @@ function WorkflowView({ settings, capabilities, agentEnvironment, onChange, onDe
         <div className="memory-settings-head settings-workflow-head"><Workflow size={18}/><div><b>角色与流程</b><span>按规划、执行、审核的协作顺序配置模型、推理强度与专用 Skill。</span></div></div>
         <div className="workflow-heading"><div><span className="eyebrow">ORCHESTRATION GRAPH</span><h2>模型协作链路</h2></div><span className="workflow-legend"><i />只读决策 <i />隔离写入 <i />证据审核</span></div>
         <div className="workflow-policy-strip"><div><RotateCcw size={15} /><span><b>Reviewer 返工循环</b><small>审核要求修改时重新进入执行；达到上限后停止并交给人工决策。</small></span></div><label><span>最大返工轮次</span><input type="number" min="0" max="8" value={settings.maxReviewLoops} onChange={(event) => onChange({ ...settings, maxReviewLoops: Number(event.target.value) })} /></label></div>
-        <ParallelSettings settings={settings} onChange={onChange} />
         <div className="role-flow">
         {(Object.keys(roleMeta) as RoleKey[]).map((role, index) => {
           const meta = roleMeta[role]; const config = settings.roles[role]
@@ -1232,6 +1231,7 @@ function WorkflowView({ settings, capabilities, agentEnvironment, onChange, onDe
           </div>{index < 2 && <div className="flow-connector"><span>{index === 0 ? '执行合同' : '验证证据'}</span><div><ChevronRight size={17} /></div></div>}</Fragment>
         })}
         </div>
+        <ParallelSettings settings={settings} onChange={onChange} />
         <div className="verification-rail"><span><ShieldCheck size={14} /></span><div><b>Foreman 独立门禁</b><small>执行完成后，在 Reviewer 介入前运行本地 lint、typecheck、test 与 build。</small></div></div>
         <div className="policy-note"><Cpu size={18} /><div><b>权限策略</b><span>规划者与审核者以只读模式运行；只有执行者能修改工作目录。所有输出都会保存在本机 SQLite 数据库。</span></div></div>
       </section>

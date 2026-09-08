@@ -26,6 +26,6 @@ describe('0.5.0 settings alignment and visible policy status', () => {
   })
 
   it('ships the latest 0.5.x interface revision', () => {
-    expect(packageJson.version).toBe('0.5.6')
+    expect(packageJson.version).toBe('0.5.7')
   })
 })

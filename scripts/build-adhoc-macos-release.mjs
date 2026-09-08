@@ -9,11 +9,15 @@ const project = process.cwd()
 const destination = join(project, 'release')
 const temporaryRelease = mkdtempSync(join(tmpdir(), 'model-foreman-adhoc-release-'))
 const builder = join(project, 'node_modules', '.bin', 'electron-builder')
+// This script intentionally produces an ad-hoc package, regardless of CI signing variables.
+const buildEnvironment = { ...process.env }
+for (const key of ['CSC_LINK', 'CSC_KEY_PASSWORD', 'CSC_NAME', 'CSC_KEYCHAIN']) delete buildEnvironment[key]
 
 try {
   run(builder, [
     '--mac',
     'dmg',
+    '--publish', 'never',
     `--config.directories.output=${temporaryRelease}`,
     '--config.mac.identity=-',
     '--config.mac.notarize=false',
@@ -42,7 +46,7 @@ try {
 }
 
 function run(command, args) {
-  const result = spawnSync(command, args, { cwd: project, stdio: 'inherit' })
+  const result = spawnSync(command, args, { cwd: project, stdio: 'inherit', env: buildEnvironment })
   if (result.status !== 0) process.exit(result.status ?? 1)
 }
 
