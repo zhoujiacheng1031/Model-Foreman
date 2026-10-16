@@ -10,7 +10,7 @@ class FakeWorkspaceManager implements WorkspaceManager {
   async prepare(): Promise<PreparedWorkspace> {
     return { path: '/tmp/test', branch: 'foreman/test', baseCommit: 'base', isolated: true, sourceDirty: false, initializedRepository: false }
   }
-  async inspect() { return { diff: 'diff', stat: '1 file', filesChanged: 1, additions: 2, deletions: 0 } }
+  async inspect() { return { diff: '--- /dev/null\n+++ b/new.txt\n--- a/removed.txt\n+++ /dev/null', stat: '2 files changed', filesChanged: 2, additions: 2, deletions: 1 } }
   async merge() { this.merged = true; return { commit: '1234567890abcdef' } }
   async discard() { this.discarded = true; return {} }
 }
@@ -41,6 +41,8 @@ describe('DeliveryService', () => {
 
     expect(manager.merged).toBe(true)
     expect(result.resolution).toBe('merged')
+    expect(result.deliveryEvidence).toEqual({ commit: '1234567890abcdef', changedFiles: ['new.txt', 'removed.txt'], stat: '2 files changed' })
+    expect(database.getRun(run.id)?.run.deliveryEvidence).toEqual(result.deliveryEvidence)
     expect(delivered[0]).toContain('fast-forward')
   })
 
@@ -88,6 +90,7 @@ describe('DeliveryService', () => {
 
     expect(manager.cleaned).toBe(true)
     expect('resolution' in result && result.resolution).toBe('merged')
+    expect(database.getRun(run.id)?.run.deliveryEvidence?.changedFiles).toEqual(['new.txt', 'removed.txt'])
   })
 })
 

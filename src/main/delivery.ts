@@ -109,7 +109,7 @@ export class DeliveryService {
   }
 
   private async finalizeMerged(runId: string, inspection: WorkspaceInspection, commit: string, cleanupWarning?: string): Promise<RunSummary> {
-    this.database.updateRun(runId, { resolution: 'merged' })
+    this.database.updateRun(runId, { resolution: 'merged', deliveryEvidence: { commit, changedFiles: changedFiles(inspection.diff), stat: inspection.stat } })
     this.emit(runId, 'result', `已 fast-forward 合并到源仓库，提交 ${commit.slice(0, 10)}`)
     const merged = this.run(runId)
     try {
@@ -134,5 +134,5 @@ function deliveryActionMessage(action: DeliveryGuideAction): string {
 }
 
 function changedFiles(diff: string): string[] {
-  return [...new Set([...diff.matchAll(/^\+\+\+ b\/(.+)$/gm)].map((match) => match[1]).filter((file) => file !== '/dev/null'))]
+  return [...new Set([...diff.matchAll(/^(?:--- a\/|\+\+\+ b\/)(.+)$/gm)].map((match) => match[1]))]
 }

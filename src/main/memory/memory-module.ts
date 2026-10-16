@@ -55,24 +55,21 @@ export class ForemanMemoryModule implements MemoryModule {
   async captureVerifiedOutcome(run: RunSummary, evidence: { commit: string; changedFiles: string[] }, settings: AppSettings): Promise<MemoryEntry[]> {
     if (!settings.memory.enabled || run.resolution !== 'merged' || run.reviewDecision?.verdict !== 'approved') return []
     this.database.invalidateMemories(run.workspace, evidence.changedFiles, evidence.commit)
-    const contract = run.contract
-    const candidates: Array<{ kind: MemoryKind; title: string; content: string; confidence: number; sourceRef: string; sourceFiles: string[] }> = []
-    if (contract) {
-      candidates.push({ kind: 'decision', title: `${run.title}：交付决策`, content: contract.summary, confidence: .88, sourceRef: 'contract.summary', sourceFiles: evidence.changedFiles })
-      for (const assumption of contract.assumptions) candidates.push({ kind: 'constraint', title: `${run.title}：前置约束`, content: assumption, confidence: .78, sourceRef: 'contract.assumption', sourceFiles: evidence.changedFiles })
-      for (const step of contract.steps) {
-        candidates.push({ kind: 'procedure', title: `${run.title}：${step.title}`, content: `${step.description}\n验收：${step.acceptanceCriteria.join('；')}`, confidence: .9, sourceRef: `contract.step:${step.id}`, sourceFiles: step.files.length ? step.files : evidence.changedFiles })
-        for (const criterion of step.acceptanceCriteria) candidates.push({ kind: 'constraint', title: `${step.title}：验收规则`, content: criterion, confidence: .92, sourceRef: `contract.step:${step.id}.acceptance`, sourceFiles: step.files })
-      }
-    } else candidates.push({ kind: 'fact', title: `${run.title}：已验证交付`, content: compact(run.result), confidence: .75, sourceRef: 'legacy.result', sourceFiles: evidence.changedFiles })
-    for (const finding of run.reviewDecision.findings.filter((item) => item.severity !== 'minor')) candidates.push({ kind: 'lesson', title: finding.title, content: `${finding.evidence}\n改进：${finding.requiredChange}`, confidence: .9, sourceRef: 'review.finding', sourceFiles: evidence.changedFiles })
-    return candidates.filter((item) => item.content.trim().length >= 2).map((item) => {
-      const previous = this.database.latestApprovedMemory(run.workspace, item.kind, item.title)
-      const created = this.database.createMemory({ ...item, workspace: run.workspace,
-        status: 'candidate', sourceRunId: run.id,
-        sourceCommit: evidence.commit, supersedesId: previous?.id })
-      return !settings.memory.requireApproval ? this.database.updateMemoryStatus(created.id, 'approved') : created
-    })
+    // Task contracts describe one delivery, not reusable project knowledge.
+    // Keep only review lessons with an explicit source and project boundary.
+    const findings = run.reviewDecision.findings.filter((item) => item.severity !== 'minor' && item.requiredChange.trim())
+    const lessons = [...new Set(findings.map((item) => `${item.title}：${item.evidence}\n改进：${item.requiredChange}`))]
+    if (!lessons.length) return []
+    const sourceRef = 'review.lessons'
+    const captured = this.list(run.workspace).find((entry) => entry.sourceRunId === run.id && entry.sourceCommit === evidence.commit && entry.sourceRef === sourceRef)
+    if (captured) return []
+    const title = `${run.title}：评审经验`
+    const previous = this.database.latestApprovedMemory(run.workspace, 'lesson', title)
+    const created = this.database.createMemory({ workspace: run.workspace, kind: 'lesson', title,
+      content: `适用范围：仅限当前项目中与本次变更相关的实现；复用前核对代码现状。\n\n${lessons.join('\n\n')}`,
+      confidence: run.reviewDecision.confidence, sourceRef, sourceFiles: evidence.changedFiles,
+      status: 'candidate', sourceRunId: run.id, sourceCommit: evidence.commit, supersedesId: previous?.id })
+    return [settings.memory.requireApproval ? created : this.database.updateMemoryStatus(created.id, 'approved')]
   }
 
   list(workspace?: string): MemoryEntry[] { return this.database.listMemories(workspace) }
@@ -89,5 +86,3 @@ export class ForemanMemoryModule implements MemoryModule {
       : Promise.resolve({ provider: 'local', ok: true, message: '本地 SQLite + FTS5 记忆已就绪' })
   }
 }
-
-function compact(value?: string): string { return (value ?? '').trim().replace(/\n{3,}/g, '\n\n').slice(0, 2400) }

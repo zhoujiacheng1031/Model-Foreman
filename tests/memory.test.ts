@@ -21,9 +21,9 @@ describe('ForemanMemoryModule', () => {
   it('auto-approval replaces invalidated knowledge through the same versioned transition', async () => {
     const db = new ForemanDatabase(':memory:', '/repo'); const memory = new ForemanMemoryModule(db)
     const settings = defaultSettings('/repo'); settings.memory.requireApproval = false
-    const previous = db.createMemory({ workspace: '/repo', kind: 'decision', title: '缓存：交付决策', content: '旧缓存方案', status: 'approved', confidence: .9, sourceFiles: ['src/cache.ts'], sourceCommit: 'old' })
+    const previous = db.createMemory({ workspace: '/repo', kind: 'lesson', title: '缓存：评审经验', content: '旧缓存方案', status: 'approved', confidence: .9, sourceFiles: ['src/cache.ts'], sourceCommit: 'old' })
     const run = db.createRun({ title: '缓存', objective: '更新缓存', workspace: '/repo' })
-    db.updateRun(run.id, { resolution: 'merged', reviewDecision: { verdict: 'approved', summary: '通过', findings: [], confidence: 1 }, contract: contract('新缓存方案', 'src/cache.ts') })
+    db.updateRun(run.id, { resolution: 'merged', reviewDecision: { verdict: 'approved', summary: '通过', findings: [lesson], confidence: 1 }, contract: contract('新缓存方案', 'src/cache.ts') })
     const entries = await memory.captureVerifiedOutcome(db.getRun(run.id)!.run, { commit: 'new', changedFiles: ['src/cache.ts'] }, settings)
     expect(entries.every((entry) => entry.status === 'approved' && entry.version === 2)).toBe(true)
     expect(db.getMemory(previous.id)?.status).toBe('superseded')
@@ -46,13 +46,56 @@ describe('ForemanMemoryModule', () => {
     const run = database.createRun({ title: '登录改造', objective: '增加安全登录', workspace: '/repo' })
     database.updateRun(run.id, { status: 'completed', resolution: 'merged', plan: '采用短期令牌并轮换刷新令牌',
       result: '实现令牌轮换，并通过认证测试', review: '{"verdict":"approved"}',
-      reviewDecision: { verdict: 'approved', summary: '通过', findings: [], confidence: .9 }, contract: contract('登录改造', 'src/auth.ts') })
+      reviewDecision: { verdict: 'approved', summary: '通过', findings: [lesson], confidence: .9 }, contract: contract('登录改造', 'src/auth.ts') })
 
     const candidates = await memory.captureVerifiedOutcome(database.getRun(run.id)!.run, { commit: 'abcdef123456', changedFiles: ['src/auth.ts'] }, settings)
 
-    expect(candidates.length).toBeGreaterThanOrEqual(3)
+    expect(candidates).toHaveLength(1)
+    expect(candidates[0].kind).toBe('lesson')
+    expect(candidates[0].content).toContain('适用范围：仅限当前项目')
+    expect(candidates[0].content).not.toContain('验收：')
     expect(candidates.every((entry) => entry.status === 'candidate')).toBe(true)
     expect(candidates.every((entry) => entry.sourceCommit === 'abcdef123456')).toBe(true)
+  })
+
+  it('does not turn a one-off contract into reusable memories and captures review lessons once', async () => {
+    const db = new ForemanDatabase(':memory:', '/repo'); const memory = new ForemanMemoryModule(db)
+    const run = db.createRun({ title: '一百字介绍', objective: '只新增 README.md', workspace: '/repo' })
+    const contractValue = contract('写一百字介绍', 'README.md')
+    contractValue.assumptions = ['空仓库']; contractValue.steps[0].acceptanceCriteria = ['恰好 100 字', '只新增 README.md']
+    db.updateRun(run.id, { resolution: 'merged', contract: contractValue, reviewDecision: { verdict: 'approved', summary: '通过', confidence: 1, findings: [] } })
+    const evidence = { commit: 'verified', changedFiles: ['README.md'] }
+    expect(await memory.captureVerifiedOutcome(db.getRun(run.id)!.run, evidence, defaultSettings('/repo'))).toEqual([])
+    db.updateRun(run.id, { reviewDecision: { verdict: 'approved', summary: '通过', confidence: .9, findings: [lesson, lesson] } })
+    const [candidate] = await memory.captureVerifiedOutcome(db.getRun(run.id)!.run, evidence, defaultSettings('/repo'))
+    expect(candidate.content.match(/认证边界/g)).toHaveLength(1)
+    expect(await memory.captureVerifiedOutcome(db.getRun(run.id)!.run, evidence, defaultSettings('/repo'))).toEqual([])
+    expect(memory.list('/repo')).toHaveLength(1)
+  })
+
+  it('curates candidates atomically, preserving provenance and requiring a separate approval', () => {
+    const db = new ForemanDatabase(':memory:', '/repo')
+    const source = { workspace: '/repo', kind: 'constraint' as const, status: 'candidate' as const, confidence: .9, sourceRunId: 'run', sourceCommit: 'commit', sourceFiles: ['README.md'] }
+    const a = db.createMemory({ ...source, title: '规则一', content: '一次性要求' })
+    const b = db.createMemory({ ...source, title: '规则二', content: '重复要求' })
+    const input = { sources: [{ id: a.id, version: a.version! }, { id: b.id, version: b.version! }], title: '文档经验', content: '先核对功能事实', applicability: '仅适用于本项目公开文档' }
+    expect(() => db.curateMemories({ ...input, sources: [input.sources[0], { id: b.id, version: 99 }] })).toThrow('变更')
+    expect(db.listMemories()).toHaveLength(2)
+    expect(db.getMemory(a.id)?.status).toBe('candidate')
+    const merged = db.curateMemories(input)
+    expect(merged).toMatchObject({ status: 'candidate', sourceRunId: 'run', sourceCommit: 'commit', content: '适用范围：仅适用于本项目公开文档\n\n先核对功能事实' })
+    expect(merged.sourceRef).toContain(a.id); expect(merged.sourceRef).toContain(b.id)
+    expect(db.getMemory(a.id)?.status).toBe('rejected'); expect(db.getMemory(b.id)?.content).toBe('重复要求')
+    expect(db.searchMemories('/repo', ['constraint'], '文档', 10)).toEqual([])
+    expect(db.updateMemoryStatus(merged.id, 'approved', merged.version).status).toBe('approved')
+  })
+
+  it('refuses cross-project curation without altering either candidate', () => {
+    const db = new ForemanDatabase(':memory:', '/repo')
+    const a = db.createMemory({ workspace: '/repo', kind: 'fact', title: 'a', content: 'a', status: 'candidate', confidence: .8 })
+    const b = db.createMemory({ workspace: '/other', kind: 'fact', title: 'b', content: 'b', status: 'candidate', confidence: .8 })
+    expect(() => db.curateMemories({ sources: [a, b].map((entry) => ({ id: entry.id, version: entry.version! })), title: 'merged', content: 'x', applicability: 'x' })).toThrow('同一项目')
+    expect(db.listMemories().map((entry) => entry.status)).toEqual(['candidate', 'candidate'])
   })
 
   it('只有批准的相关记忆会按角色和预算注入', async () => {
@@ -75,14 +118,14 @@ describe('ForemanMemoryModule', () => {
     const database = new ForemanDatabase(':memory:', '/repo')
     const memory = new ForemanMemoryModule(database)
     const settings = defaultSettings('/repo')
-    database.createMemory({ workspace: '/repo', kind: 'decision', title: '缓存：交付决策', content: '旧方案内容足够长', status: 'approved', confidence: .8, sourceFiles: ['docs/cache.md'], sourceCommit: 'oldcommit' })
+    database.createMemory({ workspace: '/repo', kind: 'lesson', title: '缓存：评审经验', content: '旧方案内容足够长', status: 'approved', confidence: .8, sourceFiles: ['docs/cache.md'], sourceCommit: 'oldcommit' })
     const run = database.createRun({ title: '缓存', objective: '更新缓存', workspace: '/repo' })
-    database.updateRun(run.id, { status: 'completed', resolution: 'merged', plan: '新方案改为两级缓存并补充一致性检查', result: '实现两级缓存并完成测试', review: '{"verdict":"approved"}', reviewDecision: { verdict: 'approved', summary: '通过', findings: [], confidence: .9 }, contract: contract('新方案', 'src/cache.ts') })
+    database.updateRun(run.id, { status: 'completed', resolution: 'merged', plan: '新方案改为两级缓存并补充一致性检查', result: '实现两级缓存并完成测试', review: '{"verdict":"approved"}', reviewDecision: { verdict: 'approved', summary: '通过', findings: [lesson], confidence: .9 }, contract: contract('新方案', 'src/cache.ts') })
     const [candidate] = await memory.captureVerifiedOutcome(database.getRun(run.id)!.run, { commit: 'newcommit', changedFiles: ['src/cache.ts'] }, settings)
 
     memory.decide(candidate.id, 'approve')
 
-    const decisions = memory.list('/repo').filter((entry) => entry.kind === 'decision')
+    const decisions = memory.list('/repo').filter((entry) => entry.kind === 'lesson')
     expect(decisions.map((entry) => entry.status).sort()).toEqual(['approved', 'superseded'])
   })
 
@@ -134,3 +177,5 @@ function contract(summary: string, file: string) {
     { id: 'step-1', title: '实施', description: summary, acceptanceCriteria: ['测试通过'], files: [file], verificationCommands: ['npm test'], status: 'completed' as const }
   ] }
 }
+
+const lesson = { severity: 'major' as const, title: '认证边界', evidence: '认证改动曾遗漏重放校验，现已补齐', requiredChange: '后续修改令牌校验时保留重放检测和相关测试' }

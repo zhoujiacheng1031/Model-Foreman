@@ -5,48 +5,21 @@ import { describe, expect, it } from 'vitest'
 const root = process.cwd()
 
 describe('topbar panel controls', () => {
-  it('places settings, terminal and the workbench inspector toggle in topbar order', async () => {
+  it('keeps settings and terminal next to a labeled new-task entry', async () => {
     const app = await readFile(join(root, 'src', 'renderer', 'src', 'App.tsx'), 'utf8')
     const topbar = app.slice(app.indexOf('<div className="topbar-actions">'), app.indexOf('</header>'))
-
     expect(topbar.indexOf('topbar-settings')).toBeLessThan(topbar.indexOf('topbar-terminal'))
-    expect(topbar.indexOf('topbar-terminal')).toBeLessThan(topbar.indexOf('topbar-panel-toggle'))
-    expect(topbar).not.toContain("{view === 'workbench' && <>")
-    expect(topbar).toContain('onClick={toggleDeliveryInspector}')
-    expect(topbar).toContain('展开运行与交付侧栏')
-    expect(topbar).toContain('收起运行与交付侧栏')
+    expect(topbar.indexOf('topbar-terminal')).toBeLessThan(topbar.indexOf('topbar-new-task'))
+    expect(topbar).toContain('onClick={newTask}')
+    expect(app).toContain("changeDocument({ type: 'new' })")
+    expect(app).not.toContain('toggleDeliveryInspector')
   })
 
-  it('keeps the panel control available outside workbench and returns directly to the panel', async () => {
+  it('uses document tabs instead of the floating page locator', async () => {
     const app = await readFile(join(root, 'src', 'renderer', 'src', 'App.tsx'), 'utf8')
-    expect(app).toContain("if (view !== 'workbench')")
-    expect(app).toContain("setView('workbench')")
-    expect(app).toContain('setDeliveryInspectorCollapsed(false)')
-  })
-
-  it('uses the topbar as the only inspector toggle and fully hides the collapsed rail', async () => {
-    const [app, styles] = await Promise.all([
-      readFile(join(root, 'src', 'renderer', 'src', 'App.tsx'), 'utf8'),
-      readFile(join(root, 'src', 'renderer', 'src', 'styles.css'), 'utf8')
-    ])
-    const workbench = app.slice(app.indexOf('function Workbench'), app.indexOf('function RepositoryControl'))
-
-    expect(workbench).not.toContain('className="delivery-rail-toggle"')
-    expect(workbench).toContain('!props.deliveryInspectorCollapsed && <aside')
-    expect(styles).toMatch(/\.workbench\.delivery-rail-collapsed\s+\.workbench-layout\s*\{[^}]*grid-template-columns:\s*minmax\(0,1fr\)/)
-  })
-
-  it('uses an icon-only floating locator at the bottom center', async () => {
-    const [app, styles] = await Promise.all([
-      readFile(join(root, 'src', 'renderer', 'src', 'App.tsx'), 'utf8'),
-      readFile(join(root, 'src', 'renderer', 'src', 'styles.css'), 'utf8')
-    ])
-    const jumpbar = app.slice(app.indexOf('<nav className="workbench-jumpbar"'), app.indexOf('</nav>', app.indexOf('<nav className="workbench-jumpbar"')))
-    expect(jumpbar).not.toContain('jumpbar-heading')
-    expect(jumpbar).not.toContain('<b>')
-    expect(jumpbar).toContain('aria-label="定位项目"')
-    expect(jumpbar).toContain('aria-label="回到顶部"')
-    expect(styles).toMatch(/\.workbench-jumpbar\s*\{[^}]*position:\s*fixed[^}]*bottom:/)
+    expect(app).toContain('<WorkspaceTabs')
+    expect(app).not.toContain('<nav className="workbench-jumpbar"')
+    expect(app).not.toContain('className="workbench-inspector"')
   })
 
   it('removes the task-tree indent line while retaining global run history', async () => {

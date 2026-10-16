@@ -25,7 +25,7 @@ describe('custom model settings experience', () => {
   it('renders custom models, capabilities, and role flow as peer settings cards', () => {
     const workflow = app.slice(app.indexOf('function WorkflowView'), app.indexOf('function AppSettingsView'))
     expect(workflow).toContain('<section className="custom-model-settings"')
-    expect(workflow).toContain('<section className="model-catalog-card">')
+    expect(workflow).toContain('<section className="model-catalog-card" id="settings-model-catalog">')
     expect(workflow).toContain('<section className="workflow-diagram settings-workflow-settings"')
     expect(workflow).not.toContain('return (\n    <section className="settings-workflow-settings"')
   })

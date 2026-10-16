@@ -45,20 +45,14 @@ describe('renderer layout contracts', () => {
     expect(styles).toMatch(/\.run-tabs button\s*\{[^}]*height:\s*42px/)
   })
 
-  it('uses a focused center canvas with persistent progress and delivery guidance on the right', () => {
+  it('keeps new-task and existing-task panels separate behind persistent tabs', () => {
     const workbenchSource = app.slice(app.indexOf('function Workbench'), app.indexOf('function DeliveryGuidePanel'))
-    expect(workbenchSource.indexOf('<RepositoryControl {...props} />')).toBeLessThan(workbenchSource.indexOf('composer-card workbench-surface'))
-    expect(workbenchSource.indexOf('composer-card workbench-surface')).toBeLessThan(workbenchSource.indexOf('run-card workbench-surface'))
-    expect(workbenchSource.match(/<RepositoryControl \{\.\.\.props\} \/>/g)).toHaveLength(1)
-    expect(workbenchSource).toContain('className="workbench-layout"')
-    expect(workbenchSource).toContain('className="workbench-canvas"')
-    expect(workbenchSource).toContain('!props.deliveryInspectorCollapsed && <aside className="workbench-inspector"')
-    expect(workbenchSource).toContain('NOW · 当前阶段')
-    expect(workbenchSource).toContain('DELIVERY GUIDE · 交付向导')
-    expect(styles).toMatch(/\.workbench-layout\s*\{[^}]*grid-template-columns:minmax\(0,1fr\) 314px/)
-    expect(styles).toMatch(/\.workbench-inspector\s*\{[^}]*position:sticky/)
-    expect(styles).toMatch(/\.workbench-inspector\s*\{[^}]*border-radius:24px[^}]*box-shadow:0 22px 58px/)
-    expect(styles).toMatch(/\.delivery-inspector\s*\{[^}]*order:-1/)
+    expect(workbenchSource).toContain('<WorkspaceTabs')
+    expect(workbenchSource).toContain("props.active === 'run' ? selected ? runContent")
+    expect(workbenchSource).toContain("runTab === 'delivery' && deliveryContent")
+    expect(workbenchSource).not.toContain('workbench-inspector')
+    expect(workbenchSource).toContain('<TaskProgress run={selected}')
+    expect(styles).toMatch(/\.workbench-document-body\s*\{[^}]*overflow:auto/)
   })
 
   it('shows complete recent task names instead of truncating them', () => {
@@ -79,8 +73,8 @@ describe('renderer layout contracts', () => {
     expect(styles).toMatch(/\.repository-tabs\s*\{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/)
     expect(app).toContain('aria-label="任务运行方式"')
     expect(app).toContain("taskMode === 'goal'")
-    expect(app).toContain('Goal Engine 会据此生成可验证的任务节点')
-    expect(app).toContain('onStartGoal={(criteria) => void startGoalFromWorkbench(criteria)}')
+    expect(app).toContain('每行一个可检查的结果')
+    expect(app).toContain('onStartGoal={(criteria, budget) => void startGoalFromWorkbench(criteria, budget)}')
     expect(styles).toMatch(/\.task-kind-selector\s*\{[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/)
   })
 
@@ -103,16 +97,14 @@ describe('renderer layout contracts', () => {
     expect(app).not.toContain('把任务交给一条清晰的执行链')
   })
 
-  it('lets the delivery rail collapse and extends delivery from worktree to GitHub', () => {
-    expect(app).toContain('deliveryInspectorCollapsed')
-    expect(app).toContain('收起运行与交付侧栏')
+  it('moves guarded Git delivery into the task document', () => {
+    expect(app).not.toContain('deliveryInspectorCollapsed')
+    expect(app).toContain("runTab === 'delivery' && deliveryContent")
     expect(app).toContain('推送 GitHub')
     expect(app).toContain('预览推送')
-    expect(app).toContain('绑定并发布')
     expect(app).toContain('预览首次发布')
     expect(app).toContain("planGitOperation(settings.workspace, 'publish'")
     expect(app).not.toContain('开始交付')
-    expect(styles).toMatch(/\.workbench\.delivery-rail-collapsed\s+\.workbench-layout\s*\{[^}]*grid-template-columns:\s*minmax\(0,1fr\)/)
   })
 
   it('uses one global typography scale instead of mixed scaled and raw body text', () => {
@@ -149,7 +141,7 @@ describe('renderer layout contracts', () => {
     expect(settingsSource).toContain('执行器、Desktop 与 Skill 环境')
     expect(memorySource).not.toContain('<MemoryConfiguration')
     expect(memorySource).toContain('按任务整理记忆')
-    expect(memorySource).toContain('每条记忆保留来源任务与交付证据')
+    expect(memorySource).toContain('先提炼可复用经验，再逐条预览批准')
     expect(styles).toMatch(/\.workflow-policy-strip\s*\{/)
     expect(styles).toMatch(/\.governance-settings\s*\{/)
   })
@@ -157,7 +149,9 @@ describe('renderer layout contracts', () => {
   it('makes repository state and explicit Skill assignment visible', () => {
     const workbenchSource = app.slice(app.indexOf('function Workbench'), app.indexOf('function RepositoryControl'))
     const workflowSource = app.slice(app.indexOf('function WorkflowView'), app.indexOf('function AppSettingsView'))
-    expect(workbenchSource).toContain('<RepositoryControl {...props} />')
+    expect(app).toContain('<dialog ref={projectPickerRef}')
+    expect(app).toContain('<RepositoryControl repository={repository}')
+    expect(workbenchSource).toContain('onOpenProjects')
     expect(app).toContain('REPOSITORY & DELIVERY')
     expect(app).toContain('从 GitHub 克隆')
     expect(app).toContain('已有 Git 仓库或全新空文件夹')
@@ -205,9 +199,9 @@ describe('renderer layout contracts', () => {
     expect(app).toContain('aria-label={sidebarCollapsed ? \'展开侧边栏\' : \'收起侧边栏\'}')
     expect(app).toContain('sidebarProjects.map')
     expect(app).toContain('project.tasks.map')
-    expect(app).toContain("['overview', '概览', <LayoutDashboard")
+    expect(app).toContain("['overview', '成果', <LayoutDashboard")
     expect(app).toContain("['resources', '资源', <Gauge")
-    expect(app).toContain('className="run-resource-summary"')
+    expect(app).toContain('className="run-resource-compact"')
     expect(styles).toMatch(/\.run-tabs\s*\{/)
     expect(styles).toMatch(/\.run-history-list\s*\{/)
     expect(styles).toMatch(/\.runtime-health\s*\{/)
@@ -253,12 +247,12 @@ describe('renderer layout contracts', () => {
     expect(styles).toMatch(/\.delivery-guide\s*\{/)
   })
 
-  it('keeps goal creation secondary and budgets collapsible', () => {
+  it('keeps goal creation secondary and exposes the shared budget before starting', () => {
     const goalSource = app.slice(app.indexOf('function GoalView'), app.indexOf('function Workbench'))
     expect(goalSource).toContain('useState(false)')
     expect(goalSource).toContain('新建目标')
-    expect(goalSource).toContain('className="goal-advanced"')
-    expect(goalSource).toContain('高级预算与循环')
+    expect(goalSource).toContain('<GoalBudgetFields value={budget}')
+    expect(goalSource).toContain('aria-describedby="goal-start-hint"')
     expect(styles).toMatch(/\.goal-advanced\s*\{/)
   })
 
@@ -268,24 +262,20 @@ describe('renderer layout contracts', () => {
     expect(app).toContain('新增内容会追加到原任务上下文')
   })
 
-  it('uses one main scroll owner with a floating icon locator and small-screen fallback', () => {
-    expect(app).toContain('workbench-jumpbar')
-    expect(app).toContain('快速定位')
-    expect(app).toContain('<ArrowUp size={17} />')
-    expect(app).toContain('jumpbar-icon project')
-    expect(app).toContain('jumpbar-icon composer')
-    expect(styles).toMatch(/\.workbench-jumpbar\s*\{[^}]*position:\s*fixed[^}]*bottom:\s*20px/)
-    expect(styles).toMatch(/\.workbench-jumpbar button\s*\{[^}]*width:\s*40px[^}]*min-height:\s*38px/)
-    expect(styles).toContain('/* One scroll owner: the main panel.')
-    expect(styles).toMatch(/\.run-tab-panel \{ height:auto;[^}]*overflow:visible/)
-    expect(styles).toContain('@media (max-height: 760px)')
+  it('keeps document tabs outside the scroll owner at small sizes', () => {
+    expect(app).not.toContain('workbench-jumpbar')
+    expect(app).toContain('className="workbench-document-body"')
+    expect(styles).toMatch(/\.document-workbench\s*\{[^}]*overflow:hidden/)
+    expect(styles).toMatch(/\.workspace-tabbar\s*\{[^}]*flex:none/)
+    expect(styles).toMatch(/\.workbench-document-body\s*\{[^}]*overflow:auto/)
+    expect(styles).toContain('@media (max-width:900px)')
   })
 
   it('shows configurable model catalogs and a real API preflight action', () => {
     expect(app).toContain('模型能力清单')
     expect(app).toContain('一键检测全部模型')
     expect(app).toContain('window.foreman.scanModelCapabilities')
-    expect(app).toContain('已支持强度')
+    expect(app).toContain('上次检测的强度')
     expect(app).not.toContain('updateModelCatalog')
     expect(styles).toMatch(/\.model-capability-grid\s*\{[^}]*grid-template-columns:repeat\(3,minmax\(0,1fr\)\)/)
   })

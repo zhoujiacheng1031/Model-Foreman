@@ -33,6 +33,7 @@ const bridge: ForemanBridge = {
   retryRun: (runId: string) => ipcRenderer.invoke('runs:retry', runId),
   deleteRun: (runId: string) => ipcRenderer.invoke('runs:delete', runId),
   listMemories: (workspace?: string) => ipcRenderer.invoke('memory:list', workspace),
+  curateMemories: (input: import('../shared/contracts').MemoryCurationInput) => ipcRenderer.invoke('memory:curate', input),
   approveMemory: (id: string, version?: number) => ipcRenderer.invoke('memory:approve', id, version),
   rejectMemory: (id: string, version?: number) => ipcRenderer.invoke('memory:reject', id, version),
   forgetMemory: (id: string) => ipcRenderer.invoke('memory:forget', id),

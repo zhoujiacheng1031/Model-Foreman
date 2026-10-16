@@ -99,6 +99,12 @@ export interface MemoryEntry {
 }
 
 export interface MemoryStats { total: number; candidate: number; approved: number; stale: number }
+export interface MemoryCurationInput {
+  sources: Array<{ id: string; version: number }>
+  title: string
+  content: string
+  applicability: string
+}
 export interface MemoryProviderHealth { provider: MemoryProviderKind; ok: boolean; message: string }
 export interface TencentDbSetupResult {
   ok: boolean
@@ -184,6 +190,7 @@ export interface RunSummary {
   baseCommit?: string
   isolated?: boolean
   resolution?: RunResolution
+  deliveryEvidence?: { commit: string; changedFiles: string[]; stat: string }
   plan?: string
   result?: string
   review?: string
@@ -407,6 +414,7 @@ export interface ForemanBridge {
   retryRun(runId: string): Promise<RunSummary>
   deleteRun(runId: string): Promise<void>
   listMemories(workspace?: string): Promise<MemoryEntry[]>
+  curateMemories(input: MemoryCurationInput): Promise<MemoryEntry>
   approveMemory(id: string, expectedVersion?: number): Promise<MemoryEntry>
   rejectMemory(id: string, expectedVersion?: number): Promise<MemoryEntry>
   forgetMemory(id: string): Promise<void>

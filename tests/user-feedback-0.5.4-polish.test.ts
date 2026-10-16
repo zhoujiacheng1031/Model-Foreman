@@ -10,7 +10,8 @@ describe('0.5.4 workbench and settings polish', () => {
     const environment = app.slice(app.indexOf('function AppSettingsView'), app.indexOf('function ApprovalPanel'))
     expect(workflow).toContain('custom-model-heading-actions')
     expect(workflow).toContain("notice || '修改后自动保存'")
-    expect(environment.match(/auto-save-status/g)?.length ?? 0).toBe(0)
+    expect(environment).toContain('settings-content-heading')
+    expect(environment).toContain('role="status"')
   })
 
   it('gives workbench roles distinct borders and aligns the two composer actions', () => {

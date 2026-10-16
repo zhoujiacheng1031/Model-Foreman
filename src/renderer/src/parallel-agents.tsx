@@ -7,10 +7,18 @@ export function ParallelSettings({ settings, onChange }: { settings: AppSettings
   const update = (index: number, patch: Partial<RoleConfig>) => onChange({ ...settings, execution: { ...policy, agents: agents.map((agent, i) => i === index ? { ...agent, ...patch } : agent) } })
   return <section className="parallel-agents-settings" aria-labelledby="parallel-settings-title">
     <div className="memory-settings-head parallel-section-head"><Layers3 size={18} /><div><b id="parallel-settings-title">并行执行 Agent</b><span>独立步骤分工执行，汇总后统一验证与审核。</span></div><span className="parallel-count">{policy.maxParallelAgents === 1 ? '串行模式' : `最多 ${policy.maxParallelAgents} 个并行`}</span></div>
-    <div className="workflow-policy-strip parallel-policy"><div><GitBranch size={16} /><span><b>按依赖与修改范围调度</b><small>配置对新任务生效；返工由主执行角色处理。</small></span></div><label><span>并行上限</span><select aria-label="最大并行 Agent 数" value={policy.maxParallelAgents} onChange={(event) => onChange({ ...settings, execution: { ...policy, maxParallelAgents: Number(event.target.value) } })}>
-      {[1, 2, 3, 4].map((count) => <option key={count} value={count}>{count === 1 ? '1 · 串行' : `${count} 个`}</option>)}
+    <div className="workflow-policy-strip parallel-policy"><div><GitBranch size={16} /><span><b>按依赖与修改范围调度</b><small>配置对新任务生效；返工由主执行角色处理。</small></span></div><label><span>并行上限</span><select aria-label="最大并行 Agent 数" value={policy.maxParallelAgents} onChange={(event) => {
+      const maxParallelAgents = Number(event.target.value)
+      if (maxParallelAgents < agents.length) return
+      onChange({ ...settings, execution: { ...policy, maxParallelAgents } })
+    }}>
+      {[1, 2, 3, 4].map((count) => <option key={count} value={count} disabled={count < agents.length}>{count === 1 ? '1 · 串行' : `${count} 个`}</option>)}
     </select></label></div>
-    <div className="parallel-members-heading"><div><b>执行成员</b><span>{agents.length ? `${agents.length} / 4 个成员 · 按步骤轮流分配` : '未配置成员时，复用上方执行角色'}</span></div><button type="button" className="quiet-button" disabled={agents.length >= 4} onClick={() => onChange({ ...settings, execution: { ...policy, agents: [...agents, structuredClone(settings.roles.implementer)] } })}><Plus size={14} />添加成员</button></div>
+    <div className="parallel-members-heading"><div><b>执行成员</b><span>{agents.length ? `${agents.length} / ${policy.maxParallelAgents} 个成员 · 按步骤轮流分配` : `最多配置 ${policy.maxParallelAgents} 个成员；未配置时复用主执行角色`}</span></div><button type="button" className="quiet-button" disabled={agents.length >= policy.maxParallelAgents} title={agents.length >= policy.maxParallelAgents ? '已达到成员上限，提高并行上限后可继续添加' : '添加一个执行成员'} onClick={() => {
+      if (agents.length >= policy.maxParallelAgents) return
+      onChange({ ...settings, execution: { ...policy, agents: [...agents, structuredClone(settings.roles.implementer)] } })
+    }}><Plus size={14} />添加成员</button></div>
+    {agents.length > policy.maxParallelAgents ? <p className="parallel-capacity-note attention" role="status">已配置 {agents.length} 个成员，超出当前上限 {policy.maxParallelAgents}。请移除多余成员或提高并行上限；已有配置已保留。</p> : <p className="parallel-capacity-note">成员数量不超过并行上限；降低上限前，请先移除多余成员。实际并发还取决于任务依赖与文件冲突。</p>}
     {agents.length === 0 && <div className="parallel-empty"><Bot size={20} /><div><b>使用主执行角色</b><p>提高并行上限即可让独立步骤同时执行，也可添加成员分别选择模型。</p></div></div>}
     <div className="parallel-agent-grid">{agents.map((agent, index) => <article className="role-card role-implementer parallel-agent-config" key={index}>
       <div className="role-card-head"><span className="role-number">{String(index + 1).padStart(2, '0')}</span><div><small>EXECUTION AGENT</small><h2>执行成员 {index + 1}</h2></div><button type="button" className="parallel-remove" aria-label={`移除 Agent ${index + 1}`} title={`移除执行成员 ${index + 1}`} onClick={() => onChange({ ...settings, execution: { ...policy, agents: agents.filter((_, i) => i !== index) } })}><Trash2 size={15} /></button></div>

@@ -25,7 +25,9 @@ describe('0.5.0 settings alignment and visible policy status', () => {
     expect(topbar.indexOf('topbar-setting-statuses')).toBeLessThan(topbar.indexOf('topbar-actions'))
   })
 
-  it('ships the latest 0.5.x interface revision', () => {
-    expect(packageJson.version).toBe('0.5.7')
+  it('keeps the application version consistent with the lockfile', () => {
+    const lock = JSON.parse(fs.readFileSync(path.resolve('package-lock.json'), 'utf8'))
+    expect(packageJson.version).toBe(lock.version)
+    expect(packageJson.version).toBe(lock.packages[''].version)
   })
 })

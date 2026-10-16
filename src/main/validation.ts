@@ -51,6 +51,13 @@ export const goalInputSchema = z.object({
   maxIterations: z.number().int().min(1).max(100), maxTaskAttempts: z.number().int().min(1).max(8)
 })
 
+export const memoryCurationSchema = z.object({
+  sources: z.array(z.object({ id: z.string().min(1), version: z.number().int().min(1) })).min(1).max(50),
+  title: z.string().trim().min(1, '请填写记忆标题').max(160),
+  content: z.string().trim().min(1, '请提炼可复用的内容').max(12000),
+  applicability: z.string().trim().min(1, '请说明这条记忆适用的条件').max(2000)
+})
+
 export function validated<T>(schema: z.ZodType<T>, value: unknown): T {
   const result = schema.safeParse(value)
   if (result.success) return result.data

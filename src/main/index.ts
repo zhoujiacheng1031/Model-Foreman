@@ -8,7 +8,7 @@ import { Orchestrator } from './orchestrator'
 import { ForemanDatabase } from './storage/database'
 import { GitWorktreeManager } from './workspace/git-worktree'
 import { DeliveryService } from './delivery'
-import { appSettingsSchema, customModelDefinitionSchema, goalInputSchema, taskInputSchema, validated } from './validation'
+import { appSettingsSchema, customModelDefinitionSchema, goalInputSchema, memoryCurationSchema, taskInputSchema, validated } from './validation'
 import { ForemanMemoryModule } from './memory/memory-module'
 import { DurableScheduler, GoalRuntime } from './goals'
 import { AgentEnvironmentService } from './agent-environment'
@@ -125,6 +125,7 @@ function registerIpc(): void {
   ipcMain.handle('runs:retry', (_event, runId: string) => runLifecycle.retry(runId))
   ipcMain.handle('runs:delete', (_event, runId: string) => runLifecycle.delete(runId))
   ipcMain.handle('memory:list', (_event, workspace?: string) => memory.list(workspace))
+  ipcMain.handle('memory:curate', (_event, input: unknown) => database.curateMemories(validated(memoryCurationSchema, input)))
   ipcMain.handle('memory:approve', (_event, id: string, version?: number) => memory.decide(id, 'approve', version))
   ipcMain.handle('memory:reject', (_event, id: string, version?: number) => memory.decide(id, 'reject', version))
   ipcMain.handle('memory:forget', (_event, id: string) => memory.forget(id))

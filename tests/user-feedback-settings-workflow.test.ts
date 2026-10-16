@@ -23,8 +23,8 @@ describe('workflow settings placement and readable runtime output', () => {
   it('links the workbench shortcut to workflow settings', () => {
     const workbench = app.slice(app.indexOf('function Workbench'), app.indexOf('function DeliveryGuidePanel'))
     expect(workbench).toContain('className="workflow-settings-shortcut"')
-    expect(workbench.indexOf('workflow-settings-shortcut')).toBeLessThan(workbench.indexOf("taskMode === 'goal' ? <Target"))
+    expect(workbench.indexOf('workflow-settings-shortcut')).toBeLessThan(workbench.indexOf("onClick={() => taskMode === 'goal' ? props.onStartGoal"))
     expect(workbench).toContain('onClick={props.onConfigureWorkflow}')
-    expect(app).toContain("document.getElementById('role-workflow-settings')?.scrollIntoView")
+    expect(app).toContain("openSettings('role-workflow-settings')")
   })
 })

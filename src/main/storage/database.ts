@@ -111,6 +111,7 @@ export class ForemanDatabase {
     this.ensureColumn('pause_reason', 'TEXT')
     this.ensureColumn('agent_tasks', "TEXT NOT NULL DEFAULT '[]'")
     this.ensureColumn('execution_policy', 'TEXT')
+    this.ensureColumn('delivery_evidence', 'TEXT')
     this.ensureGoalColumn('token_budget', 'INTEGER')
     this.ensureGoalColumn('cost_budget_usd', 'REAL')
     this.ensureGoalTaskColumn('run_history', "TEXT NOT NULL DEFAULT '[]'")
@@ -158,11 +159,11 @@ export class ForemanDatabase {
     return run
   }
 
-  updateRun(id: string, fields: Partial<Pick<RunSummary, 'status' | 'plan' | 'result' | 'review' | 'error' | 'executionWorkspace' | 'branch' | 'baseCommit' | 'isolated' | 'resolution' | 'contract' | 'implementationReport' | 'reviewDecision' | 'verification' | 'checkpointPhase' | 'pauseReason' | 'additionalInstructions' | 'reviewAttempt' | 'usageTokens' | 'costUsd' | 'stageMetrics' | 'agentTasks' | 'executionPolicy'>>): void {
+  updateRun(id: string, fields: Partial<Pick<RunSummary, 'status' | 'plan' | 'result' | 'review' | 'error' | 'executionWorkspace' | 'branch' | 'baseCommit' | 'isolated' | 'resolution' | 'deliveryEvidence' | 'contract' | 'implementationReport' | 'reviewDecision' | 'verification' | 'checkpointPhase' | 'pauseReason' | 'additionalInstructions' | 'reviewAttempt' | 'usageTokens' | 'costUsd' | 'stageMetrics' | 'agentTasks' | 'executionPolicy'>>): void {
     const entries = Object.entries(fields).filter(([, value]) => value !== undefined)
     if (!entries.length) return
     const columns: Record<string, string> = {
-      agentTasks: 'agent_tasks', executionPolicy: 'execution_policy', status: 'status', plan: 'plan', result: 'result', review: 'review', error: 'error',
+      agentTasks: 'agent_tasks', executionPolicy: 'execution_policy', deliveryEvidence: 'delivery_evidence', status: 'status', plan: 'plan', result: 'result', review: 'review', error: 'error',
       executionWorkspace: 'execution_workspace', branch: 'branch', baseCommit: 'base_commit',
       isolated: 'isolated', resolution: 'resolution', contract: 'contract', implementationReport: 'implementation_report',
       reviewDecision: 'review_decision', verification: 'verification', checkpointPhase: 'checkpoint_phase', pauseReason: 'pause_reason', additionalInstructions: 'additional_instructions', reviewAttempt: 'review_attempt', usageTokens:'usage_tokens',costUsd:'cost_usd',stageMetrics:'stage_metrics'
@@ -333,6 +334,33 @@ export class ForemanDatabase {
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
   }
 
+  curateMemories(input: import('../../shared/contracts').MemoryCurationInput): MemoryEntry {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      if (!input.sources.length || new Set(input.sources.map((source) => source.id)).size !== input.sources.length) throw new Error('请选择不同的待审核候选')
+      const entries = input.sources.map((source) => {
+        const entry = this.getMemory(source.id)
+        if (!entry || entry.status !== 'candidate' || entry.version !== source.version) throw new Error('候选已变更，请刷新后重新整理')
+        return entry
+      })
+      const first = entries[0]
+      if (entries.some((entry) => entry.workspace !== first.workspace || entry.sourceRunId !== first.sourceRunId || entry.sourceCommit !== first.sourceCommit)) throw new Error('只能整理同一项目、任务与提交的候选')
+      const kind = entries.every((entry) => entry.kind === first.kind) ? first.kind : 'lesson'
+      const previous = this.latestApprovedMemory(first.workspace, kind, input.title)
+      const created = this.createMemory({ workspace: first.workspace, kind, title: input.title,
+        content: `适用范围：${input.applicability}\n\n${input.content}`, status: 'candidate', confidence: Math.min(...entries.map((entry) => entry.confidence)),
+        sourceRunId: first.sourceRunId, sourceCommit: first.sourceCommit, sourceRef: `curated:${entries.map((entry) => entry.id).join(',')}`,
+        sourceFiles: [...new Set(entries.flatMap((entry) => entry.sourceFiles))], supersedesId: previous?.id })
+      const now = new Date().toISOString()
+      for (const entry of entries) {
+        this.db.prepare("UPDATE memories SET status='rejected', version=version+1, updated_at=? WHERE id=?").run(now, entry.id)
+        this.db.prepare('INSERT INTO memory_audit(memory_id,from_status,to_status,version,at) VALUES (?,?,?,?,?)').run(entry.id, entry.status, 'rejected', (entry.version ?? 1) + 1, now)
+      }
+      this.db.exec('COMMIT')
+      return created
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+  }
+
   incrementMemoryUsage(ids: string[]): void {
     const statement = this.db.prepare('UPDATE memories SET usage_count=usage_count+1 WHERE id=?')
     for (const id of ids) statement.run(id)
@@ -378,7 +406,7 @@ function mergeModelCatalog(defaults: AppSettings['models'][ExecutorKind], saved?
 interface RunRow {
   id: string; title: string; objective: string; workspace: string; status: RunStatus
   created_at: string; updated_at: string; plan?: string; result?: string; review?: string; error?: string
-  agent_tasks?: string; execution_policy?: string
+  agent_tasks?: string; execution_policy?: string; delivery_evidence?: string
   execution_workspace?: string; branch?: string; isolated?: number
   base_commit?: string; resolution?: RunSummary['resolution']
   contract?: string; implementation_report?: string; review_decision?: string; verification?: string
@@ -402,7 +430,7 @@ function mapRun(row: RunRow): RunSummary {
     status: row.status, createdAt: row.created_at, updatedAt: row.updated_at,
     executionWorkspace: row.execution_workspace ?? undefined,
     branch: row.branch ?? undefined, baseCommit: row.base_commit ?? undefined,
-    isolated: Boolean(row.isolated), resolution: row.resolution ?? 'open',
+    isolated: Boolean(row.isolated), resolution: row.resolution ?? 'open', deliveryEvidence: parseJson<RunSummary['deliveryEvidence']>(row.delivery_evidence),
     plan: row.plan ?? undefined, result: row.result ?? undefined,
     review: row.review ?? undefined, error: row.error ?? undefined
     , contract: parseJson<ExecutionContract>(row.contract), implementationReport: parseJson<ImplementationReport>(row.implementation_report),

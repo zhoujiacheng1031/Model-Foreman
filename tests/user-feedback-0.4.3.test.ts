@@ -10,7 +10,7 @@ describe('0.4.3 project hierarchy and workflow polish', () => {
 
     expect(app).toContain('sidebarProjects')
     expect(app).toContain('project-run-group')
-    expect(app).toContain('project-run-toggle')
+    expect(app).toContain('<ProjectHeading workspace={project.workspace}')
     expect(app).toContain('workspaceName(project.workspace)')
     expect(app).toContain('project.tasks.map')
   })

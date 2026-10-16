@@ -41,13 +41,13 @@ describe('0.4.6 interface hierarchy and density', () => {
     expect(styles).toContain('.page-command-bar')
   })
 
-  it('uses equal-width semantic memory governance actions', () => {
+  it('keeps semantic memory governance labels on one line without a fixed width', () => {
     const memory = slice('function MemoryView', 'function MemoryConfiguration')
     expect(memory).toContain('className="memory-approve-button"')
     expect(memory).toContain('className="memory-reject-button"')
     expect(memory).toContain('<X size={13} />拒绝')
     expect(memory).toContain('className="danger-button memory-delete-button"')
-    expect(styles).toMatch(/\.memory-actions > button\s*\{[^}]*width:\s*86px/)
+    expect(styles).toMatch(/\.memory-actions > button\s*\{[^}]*width:\s*auto[^}]*white-space:nowrap/)
     expect(styles).toMatch(/\.memory-approve-button\s*\{[^}]*background:#f0faf3[^}]*color:#24863e/)
     expect(styles).toMatch(/\.memory-reject-button\s*\{[^}]*background:#fff9e9[^}]*color:#8a6413/)
   })

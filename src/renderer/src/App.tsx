@@ -1,9 +1,9 @@
 import { ParallelSettings, AgentTaskPanel } from './parallel-agents'
-import { Fragment, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity, ArrowUp, Bot, Brain, Check, ChevronDown, ChevronRight, CircleStop, Cpu, FolderGit2,
+  Activity, Bot, Brain, Check, ChevronDown, ChevronRight, CircleStop, Cpu, FolderGit2,
   FileDiff, FolderOpen, Gauge, GitMerge, LayoutDashboard, LoaderCircle, Play, Plus,
-  Monitor, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Pause, Puzzle, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, Sparkles, Target, TerminalSquare, Trash2, X,
+  Monitor, PanelLeftClose, PanelLeftOpen, Pause, Puzzle, RefreshCw, RotateCcw, Save, Settings2, ShieldCheck, Sparkles, Target, TerminalSquare, Trash2, X,
   Github, GitBranch, CloudDownload, ExternalLink, GitPullRequest, Workflow, History
 } from 'lucide-react'
 import type {
@@ -12,6 +12,16 @@ import type {
 } from '../../shared/contracts'
 import foremanIcon from './assets/foreman-line-cat-icon.png'
 import { buildModelCapabilityTargets, selectableModelCatalog } from './model-capabilities'
+import { defaultGoalBudget, goalBudgetError, goalBudgetInput, GoalBudgetFields, type GoalBudget } from './goal-budget'
+import { executorReadiness, modelReadiness } from './runtime-readiness'
+import { ContractSummary, RunOverview } from './run-artifacts'
+import { MemoryCurationDialog, MemoryApprovalDialog, needsMemoryCuration } from './memory-curation'
+import type { TaskDraft } from './task-draft'
+import { useWorkspaceDocuments, hasDraftContent, MAX_WORKSPACE_TABS, tabLimitMessage, type WorkspaceDocuments } from './workspace-documents'
+import { WorkspaceTabs, workspaceTabId } from './workspace-tabs'
+import { TaskProgress } from './task-progress'
+import { ProjectHeading } from './project-heading'
+import { settingsGroups, readRecentWorkspaces, type SettingsSection } from './settings-navigation'
 
 type View = 'workbench' | 'runs' | 'goals' | 'memory' | 'settings'
 
@@ -28,17 +38,21 @@ const roleMeta: Record<RoleKey, { label: string; eyebrow: string; index: string 
 export function App() {
   const [view, setView] = useState<View>('workbench')
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [deliveryInspectorCollapsed, setDeliveryInspectorCollapsed] = useState(() => window.localStorage.getItem('foreman:delivery-rail-collapsed') === 'true')
+  const [showRepository, setShowRepository] = useState(false)
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('settings-environment')
+  const [recentWorkspaces, setRecentWorkspaces] = useState(() => readRecentWorkspaces(window.localStorage))
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [capabilities, setCapabilities] = useState<ExecutorCapability[]>([])
   const [agentEnvironment, setAgentEnvironment] = useState<AgentEnvironment>({ desktops: [], skills: [], scannedAt: '' })
   const [repository, setRepository] = useState<RepositoryInspection>({ connected: false, hasCommits: false, bootstrapEligible: false, workspace: '', detached: false, ahead: 0, behind: 0, staged: 0, unstaged: 0, untracked: 0, conflicts: 0, clean: false, branches: [], message: '正在检查仓库…' })
   const [githubDelivery, setGithubDelivery] = useState<GitHubDeliveryStatus>({ available: false, authenticated: false, workflowRuns: [], polledAt: '', message: '正在检查 GitHub 交付状态…' })
   const [runs, setRuns] = useState<RunSummary[]>([])
-  const [selectedId, setSelectedId] = useState<string>()
   const [events, setEvents] = useState<RunEvent[]>([])
-  const [title, setTitle] = useState('')
-  const [objective, setObjective] = useState('')
+  const documents = useWorkspaceDocuments(settings?.workspace ?? '')
+  const { draft, update: updateDraft, saveError: draftSaveError } = documents
+  const selectedId = documents.active?.kind === 'run' ? documents.active.runId : undefined
+  const workbenchTab = documents.active?.kind ?? 'empty'
+  const { title, objective } = draft
   const [notice, setNotice] = useState('')
   const [inspection, setInspection] = useState<WorkspaceInspection | null>(null)
   const [deliveryGuide, setDeliveryGuide] = useState<DeliveryGuide | null>(null)
@@ -55,6 +69,9 @@ export function App() {
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set())
   const [resumeTarget, setResumeTarget] = useState<RunSummary | null>(null)
   const [resumeSupplement, setResumeSupplement] = useState('')
+  const projectPickerRef = useRef<HTMLDialogElement>(null)
+  const workspaceRef = useRef(settings?.workspace)
+  workspaceRef.current = settings?.workspace
   const runMenuRef = useRef<HTMLDivElement>(null)
   const selectedIdRef = useRef<string | undefined>(undefined)
   const selectionRequestRef = useRef(0)
@@ -69,18 +86,57 @@ export function App() {
   const sidebarProjects = useMemo(() => {
     const grouped = new Map<string, RunSummary[]>()
     for (const run of runs) grouped.set(run.workspace, [...(grouped.get(run.workspace) ?? []), run])
+    for (const workspace of recentWorkspaces) if (!grouped.has(workspace)) grouped.set(workspace, [])
     if (settings?.workspace && !grouped.has(settings.workspace)) grouped.set(settings.workspace, [])
     return [...grouped].map(([workspace, tasks]) => ({ workspace, tasks: [...tasks].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) }))
       .sort((a, b) => a.workspace === settings?.workspace ? -1 : b.workspace === settings?.workspace ? 1 : (b.tasks[0]?.updatedAt ?? '').localeCompare(a.tasks[0]?.updatedAt ?? ''))
-  }, [runs, settings?.workspace])
+  }, [runs, settings?.workspace, recentWorkspaces])
+
+  useEffect(() => {
+    if (!settings?.workspace) return
+    setRecentWorkspaces((current) => {
+      const next = [settings.workspace, ...current.filter((path) => path !== settings.workspace)].slice(0, 20)
+      try { window.localStorage.setItem('foreman:recent-workspaces', JSON.stringify(next)) } catch { /* History is optional; drafts report their own save failures. */ }
+      return next
+    })
+  }, [settings?.workspace])
+
+  function openSettings(section: SettingsSection) { setSettingsSection(section); setView('settings') }
+
+  useEffect(() => {
+    if (showRepository) projectPickerRef.current?.showModal()
+    else projectPickerRef.current?.close()
+  }, [showRepository])
+
+  async function openRun(id: string) {
+    const run = runs.find((item) => item.id === id)
+    if (!run || busy) return
+    const projectDocuments = documents.get(run.workspace)
+    if (!projectDocuments.tabs.some((tab) => tab.id === `run:${id}`) && projectDocuments.tabs.length >= MAX_WORKSPACE_TABS) { setActionError(tabLimitMessage); return }
+    if (run.workspace !== settings?.workspace) {
+      const switched = await perform('choose', () => activateWorkspace(run.workspace))
+      if (!switched) return
+    }
+    try { documents.change(run.workspace, { type: 'open-run', runId: id }); setView('workbench') }
+    catch (error) { setActionError(error instanceof Error ? error.message : String(error)) }
+  }
+
+  function changeDocument(action: import('./workspace-documents').DocumentAction) {
+    if (!settings) return
+    try { documents.change(settings.workspace, action); setActionError('') }
+    catch (error) { setActionError(error instanceof Error ? error.message : String(error)) }
+  }
+
+  function newTask() {
+    if (!settings) return
+    changeDocument({ type: 'new' }); setView('workbench'); setShowRepository(false)
+  }
 
   async function refreshRuns(select?: string, includeEvents = true) {
     const next = await window.foreman.listRuns()
     setRuns(next)
-    const target = select ?? selectedId ?? next[0]?.id
-    if (target && includeEvents) {
-      setSelectedId(target)
-      selectedIdRef.current = target
+    const target = select ?? selectedIdRef.current
+    if (target && includeEvents && selectedIdRef.current === target) {
       const request = ++selectionRequestRef.current
       const detail = await window.foreman.getRun(target)
       if (request === selectionRequestRef.current && selectedIdRef.current === target) setEvents(detail?.events ?? [])
@@ -94,7 +150,7 @@ export function App() {
         setSettings(nextSettings); setCapabilities(nextCapabilities); setRuns(nextRuns)
         const [environment, repositoryState] = await Promise.all([window.foreman.inspectAgentEnvironment(nextSettings.workspace), window.foreman.inspectRepository(nextSettings.workspace)])
         setAgentEnvironment(environment); setRepository(repositoryState); void refreshGitHubDelivery(nextSettings.workspace)
-        if (nextRuns[0]) { setSelectedId(nextRuns[0].id); void refreshRuns(nextRuns[0].id) }
+
       })
       .catch((error) => setActionError(error instanceof Error ? error.message : String(error)))
     return window.foreman.onRunEvent((event) => {
@@ -103,7 +159,11 @@ export function App() {
     })
   }, [])
 
-  useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
+  useEffect(() => {
+    selectedIdRef.current = selectedId
+    ++selectionRequestRef.current; setEvents([]); setInspection(null)
+    if (selectedId) void selectRun(selectedId)
+  }, [selectedId, settings?.workspace])
   useEffect(() => {
     if (!settings) return
     const serialized = JSON.stringify(settings)
@@ -122,7 +182,6 @@ export function App() {
     }, 650)
     return () => window.clearTimeout(timer)
   }, [settings])
-  useEffect(() => { window.localStorage.setItem('foreman:delivery-rail-collapsed', String(deliveryInspectorCollapsed)) }, [deliveryInspectorCollapsed])
   useEffect(() => { setDeliveryGuide(null) }, [selectedId])
   useEffect(() => {
     if (!runMenu) return
@@ -160,7 +219,7 @@ export function App() {
     setSelectedGoal(id ? await window.foreman.getGoal(id) : null)
   }
   async function createGoal(value: Parameters<typeof window.foreman.createGoal>[0]) {
-    await perform('goal-create', async () => { const detail = await window.foreman.createGoal(value); setSelectedGoal(detail); await refreshGoals(detail.goal.id) })
+    return perform('goal-create', async () => { const detail = await window.foreman.createGoal(value); setSelectedGoal(detail); await refreshGoals(detail.goal.id) })
   }
   async function commandGoal(command: GoalCommand) {
     if (!selectedGoal) return
@@ -191,10 +250,14 @@ export function App() {
   }
 
   async function decideMemory(id: string, decision: 'approve' | 'reject') {
-    await perform(`memory-${decision}`, async () => {
+    return perform(`memory-${decision}`, async () => {
       if (decision === 'approve') await window.foreman.approveMemory(id, memories.find((entry) => entry.id === id)?.version); else await window.foreman.rejectMemory(id, memories.find((entry) => entry.id === id)?.version)
       await refreshMemories()
     })
+  }
+
+  async function curateMemories(input: import('../../shared/contracts').MemoryCurationInput) {
+    return perform('memory-curate', async () => { await window.foreman.curateMemories(input); await refreshMemories() })
   }
 
   async function forgetMemory(id: string) {
@@ -211,34 +274,40 @@ export function App() {
 
   async function startRun() {
     if (!settings || !objective.trim()) return
+    const submittedId = documents.active?.id
+    if (!submittedId) return
+    const workspace = settings.workspace
     await perform('start', async () => {
       const run = await window.foreman.startRun({
         title: title.trim() || objective.trim().slice(0, 34), objective: objective.trim(), workspace: settings.workspace
       })
-      setTitle(''); setObjective(''); setSelectedId(run.id); setEvents([])
+      documents.change(workspace, { type: 'submitted', id: submittedId, draft, runId: run.id })
       await refreshRuns(run.id)
     })
   }
 
-  async function startGoalFromWorkbench(successCriteria: string[]) {
+  async function startGoalFromWorkbench(successCriteria: string[], budget: GoalBudget) {
     if (!settings || !objective.trim() || !successCriteria.length) return
+    const submittedId = documents.active?.id
+    if (!submittedId) return
+    const workspace = settings.workspace
     await perform('goal-create', async () => {
       const detail = await window.foreman.createGoal({
         title: title.trim() || objective.trim().slice(0, 40), objective: objective.trim(), workspace: settings.workspace,
-        successCriteria, constraints: [], priority: 50, maxIterations: 24, maxTaskAttempts: 2,
-        timeBudgetSeconds: 24 * 3600, tokenBudget: 2_000_000
+        successCriteria, constraints: [], priority: 50, ...goalBudgetInput(budget)
       })
-      setTitle(''); setObjective(''); setSelectedGoal(detail); await refreshGoals(detail.goal.id); setView('goals')
+      documents.change(workspace, { type: 'submitted', id: submittedId, draft }); setSelectedGoal(detail); await refreshGoals(detail.goal.id); setView('goals')
     })
   }
 
   async function selectRun(id: string) {
     await perform('select', async () => {
-      setSelectedId(id)
-      selectedIdRef.current = id
       const request = ++selectionRequestRef.current
       const detail = await window.foreman.getRun(id)
-      if (request === selectionRequestRef.current && selectedIdRef.current === id) setEvents(detail?.events ?? [])
+      if (request === selectionRequestRef.current && selectedIdRef.current === id) {
+        if (detail) setEvents(detail.events)
+        else { documents.change(settings!.workspace, { type: 'close', id: `run:${id}` }); setActionError('任务记录已不存在，已关闭对应页签。') }
+      }
     }, false)
   }
 
@@ -288,9 +357,11 @@ export function App() {
   async function resumeRun() {
     if (!resumeTarget) return
     const target = resumeTarget
+    await openRun(target.id)
+    if (!documents.get(target.workspace).tabs.some((tab) => tab.id === `run:${target.id}`)) return
     await perform('resume', async () => {
       await window.foreman.commandRun(target.id, { type: 'resume', instructions: resumeSupplement })
-      setResumeTarget(null); setResumeSupplement(''); await refreshRuns(target.id)
+      setResumeTarget(null); setResumeSupplement(''); setView('workbench'); await refreshRuns(target.id)
     })
   }
 
@@ -383,8 +454,11 @@ export function App() {
 
   async function retryRun(target = selected) {
     if (!target || target.status !== 'failed') return
+    if (documents.get(target.workspace).tabs.length >= MAX_WORKSPACE_TABS) { setActionError(tabLimitMessage); return }
+    if (target.workspace !== settings?.workspace) { const switched = await perform('choose', () => activateWorkspace(target.workspace)); if (!switched) return }
     await perform('retry-run', async () => {
       const retried = await window.foreman.retryRun(target.id)
+      documents.change(target.workspace, { type: 'open-run', runId: retried.id }); setView('workbench')
       setInspection(null)
       setEvents([])
       await refreshRuns(retried.id)
@@ -399,16 +473,12 @@ export function App() {
     if (!window.confirm(`确定删除任务“${target.title}”？${scope}`)) return
     await perform('delete-run', async () => {
       await window.foreman.deleteRun(target.id)
+      documents.change(target.workspace, { type: 'close', id: `run:${target.id}` })
       setInspection(null)
       setEvents([])
       const next = await window.foreman.listRuns()
       setRuns(next)
-      const replacement = next[0]
-      setSelectedId(replacement?.id)
-      if (replacement) {
-        const detail = await window.foreman.getRun(replacement.id)
-        setEvents(detail?.events ?? [])
-      }
+
     })
   }
 
@@ -420,28 +490,39 @@ export function App() {
     })
   }
 
-  async function chooseWorkspace() {
+  async function activateWorkspace(path: string, inspected?: RepositoryInspection) {
     if (!settings) return
+    const [repositoryState, environment] = await Promise.all([inspected ?? window.foreman.inspectRepository(path), window.foreman.inspectAgentEnvironment(path)])
+    const workspace = repositoryState.root ?? path
+    const nextSettings = await window.foreman.saveSettings({ ...settings, workspace })
+    workspaceRef.current = workspace
+    ++settingsSaveSequenceRef.current
+    lastSavedSettingsRef.current = JSON.stringify(nextSettings)
+    setRepository(repositoryState); setAgentEnvironment(environment); setSettings(nextSettings)
+    setGitOperationPlan(null); setDeliveryGuide(null); setInspection(null)
+    setGithubDelivery({ available: false, authenticated: false, workflowRuns: [], polledAt: '', message: '正在检查 GitHub 交付状态…' })
+    setShowRepository(false); setView('workbench')
+    void refreshGitHubDelivery(workspace)
+  }
+
+  async function switchWorkspace(path: string) {
+    if (busy) return
+    await perform('choose', () => activateWorkspace(path))
+  }
+
+  async function chooseWorkspace() {
+    if (!settings || busy) return
     await perform('choose', async () => {
       const path = await window.foreman.chooseWorkspace()
-      if (path) {
-        const [repositoryState, environment] = await Promise.all([window.foreman.inspectRepository(path), window.foreman.inspectAgentEnvironment(path)])
-        const workspace = repositoryState.root ?? path
-        const nextSettings = await window.foreman.saveSettings({ ...settings, workspace })
-        setRepository(repositoryState); setAgentEnvironment(environment); setSettings(nextSettings); void refreshGitHubDelivery(workspace)
-      }
+      if (path) await activateWorkspace(path)
     })
   }
 
   async function cloneGitHubRepository(url: string) {
-    if (!settings) return
+    if (!settings || busy) return
     await perform('clone-github', async () => {
       const repositoryState = await window.foreman.cloneGitHubRepository(url)
-      if (!repositoryState) return
-      const workspace = repositoryState.root ?? repositoryState.workspace
-      const [environment, nextSettings] = await Promise.all([window.foreman.inspectAgentEnvironment(workspace), window.foreman.saveSettings({ ...settings, workspace })])
-      setRepository(repositoryState); setAgentEnvironment(environment); setSettings(nextSettings); void refreshGitHubDelivery(workspace)
-      setNotice('GitHub 仓库已克隆'); window.setTimeout(() => setNotice(''), 2200)
+      if (repositoryState) await activateWorkspace(repositoryState.root ?? repositoryState.workspace, repositoryState)
     })
   }
 
@@ -455,8 +536,8 @@ export function App() {
 
   async function refreshGitHubDelivery(workspace = settings?.workspace) {
     if (!workspace) return
-    try { setGithubDelivery(await window.foreman.inspectGitHubDelivery(workspace)) }
-    catch (error) { setGithubDelivery({ available: false, authenticated: false, workflowRuns: [], polledAt: new Date().toISOString(), message: error instanceof Error ? error.message : String(error) }) }
+    try { const status = await window.foreman.inspectGitHubDelivery(workspace); if (workspaceRef.current === workspace) setGithubDelivery(status) }
+    catch (error) { if (workspaceRef.current === workspace) setGithubDelivery({ available: false, authenticated: false, workflowRuns: [], polledAt: new Date().toISOString(), message: error instanceof Error ? error.message : String(error) }) }
   }
 
   async function openRepositoryRemote(url = repository.remoteWebUrl) {
@@ -465,9 +546,10 @@ export function App() {
   }
 
   async function openWorkspace() {
-    if (!selected?.executionWorkspace) return
+    const workspace = selected && (selected.resolution ?? 'open') === 'open' ? selected.executionWorkspace ?? selected.workspace : selected?.workspace ?? settings?.workspace
+    if (!workspace) return
     await perform('open', async () => {
-      const error = await window.foreman.openWorkspace(selected.executionWorkspace!)
+      const error = await window.foreman.openWorkspace(workspace)
       if (error) throw new Error(error)
     }, false)
   }
@@ -480,33 +562,24 @@ export function App() {
     }, false)
   }
 
-  function toggleDeliveryInspector() {
-    if (view !== 'workbench') {
-      setView('workbench')
-      setDeliveryInspectorCollapsed(false)
-      return
-    }
-    setDeliveryInspectorCollapsed((collapsed) => !collapsed)
-  }
-
   function openWorkflowSettings() {
-    setView('settings')
-    window.setTimeout(() => document.getElementById('role-workflow-settings')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0)
+    openSettings('role-workflow-settings')
   }
 
   async function perform(name: string, action: () => Promise<void>, showBusy = true) {
     setActionError('')
     if (showBusy) setBusy(name)
-    try { await action() }
+    try { await action(); return true }
     catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       setActionError(message.replace(/^Error invoking remote method '[^']+': Error:\s*/i, ''))
+      return false
     }
     finally { if (showBusy) setBusy(undefined) }
   }
 
   return (<>
-    <div className={sidebarCollapsed ? 'app-shell sidebar-collapsed' : 'app-shell'}>
+    <div className={sidebarCollapsed ? 'app-shell task-workspace-shell sidebar-collapsed' : 'app-shell task-workspace-shell'}>
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark"><img src={foremanIcon} alt="" /></div>
@@ -533,9 +606,9 @@ export function App() {
             {sidebarProjects.map((project) => {
               const collapsed = collapsedProjects.has(project.workspace)
               return <section className={project.workspace === settings?.workspace ? 'project-run-group active' : 'project-run-group'} key={project.workspace}>
-                <button className="project-run-toggle" title={project.workspace} aria-expanded={!collapsed} onClick={() => setCollapsedProjects((current) => { const next = new Set(current); if (next.has(project.workspace)) next.delete(project.workspace); else next.add(project.workspace); return next })}><FolderGit2 size={14} /><span><b>{workspaceName(project.workspace)}</b><small>{project.tasks.length} 个任务</small></span><ChevronDown size={14} /></button>
-                {!collapsed && <div className="run-list">{project.tasks.length === 0 ? <p className="empty-copy">当前项目还没有任务</p> : project.tasks.map((run) => (
-                  <button key={run.id} title={run.title} className={selectedId === run.id ? 'run-item selected' : 'run-item'} onContextMenu={(event) => { event.preventDefault(); setRunMenu({ run, x: event.clientX, y: event.clientY }) }} onClick={() => { setView('workbench'); void selectRun(run.id) }}>
+                <ProjectHeading workspace={project.workspace} count={project.tasks.length} current={project.workspace === settings?.workspace} collapsed={collapsed} disabled={Boolean(busy)} onSelect={() => void switchWorkspace(project.workspace)} onToggle={() => setCollapsedProjects((current) => { const next = new Set(current); if (next.has(project.workspace)) next.delete(project.workspace); else next.add(project.workspace); return next })} />
+                {!collapsed && <div className="run-list">{project.tasks.length === 0 ? <p className="empty-copy">此项目还没有任务</p> : project.tasks.map((run) => (
+                  <button key={run.id} title={run.title} className={selectedId === run.id ? 'run-item selected' : 'run-item'} onContextMenu={(event) => { event.preventDefault(); setRunMenu({ run, x: event.clientX, y: event.clientY }) }} onClick={() => { setView('workbench'); void openRun(run.id) }}>
                     <span className={`status-dot ${run.status}`} />
                     <span><b>{run.title}</b><small>{statusLabel[run.status]} · {formatDate(run.updatedAt)}</small></span>
                   </button>
@@ -552,7 +625,7 @@ export function App() {
             const desktop = agentEnvironment.desktops.find((item) => item.kind === kind)
             const cliReady = Boolean(capability?.installed && capability.authenticated)
             const desktopReady = Boolean(desktop?.installed)
-            return <button className="runtime-health-row" key={kind} onClick={() => setView('settings')} title={`${kind === 'codex' ? 'Codex' : 'Claude Code'} CLI：${capability?.installed ? `${capability.version} · ${capability.authenticationMessage}` : '未检测到独立 CLI'}\nDesktop：${desktopReady ? desktop?.appPath || '可用' : '未安装'}`}>
+            return <button className="runtime-health-row" key={kind} onClick={() => openSettings('settings-environment')} title={`${kind === 'codex' ? 'Codex' : 'Claude Code'} CLI：${executorReadiness(kind, capabilities).label} · ${executorReadiness(kind, capabilities).detail}\nDesktop：${desktopReady ? desktop?.appPath || '可用' : '未安装'}`}>
               <span className="runtime-provider"><span className={`provider-mark ${kind}`}><TerminalSquare size={11} /></span><b>{kind === 'codex' ? 'Codex' : 'Claude'}</b></span>
               <span className="runtime-statuses"><span className={cliReady ? 'ready' : 'offline'}><i />CLI</span><span className={desktopReady ? 'ready' : 'offline'}><i />Desktop</span></span>
             </button>
@@ -562,26 +635,27 @@ export function App() {
 
       <main className="main-panel">
         <header className="topbar">
-          <div className="workspace-pill"><FolderGit2 size={15} /><span>{settings?.workspace || '载入中…'}</span></div>
+          <button className="workspace-pill" title={settings?.workspace} aria-label="项目详情与切换" aria-expanded={showRepository} aria-haspopup="dialog" onClick={() => setShowRepository((open) => !open)}><FolderGit2 size={15} /><span>{settings ? workspaceName(settings.workspace) : '载入中…'}</span>{repository.connected && <small>{repository.branch || '未连接分支'}</small>}<ChevronDown size={13} /></button>
           {settings && <div className="topbar-setting-statuses" aria-label="运行策略状态">
-            <button className={settings.verification.enabled ? 'topbar-setting-status enabled' : 'topbar-setting-status disabled'} title={`独立验证门禁：${settings.verification.enabled ? settings.verification.stopOnFailure ? '严格模式' : '已开启' : '已关闭'}`} onClick={() => setView('settings')}><ShieldCheck size={13} /><span>门禁 · {settings.verification.enabled ? settings.verification.stopOnFailure ? '严格' : '开启' : '关闭'}</span></button>
-            <button className={`topbar-setting-status ${automaticApprovals === 2 ? 'enabled' : automaticApprovals === 1 ? 'partial' : 'disabled'}`} title={`自动批准：规划者${settings.approvals.planner.autoApprove ? `开启（${Math.round(settings.approvals.planner.minConfidence * 100)}%）` : '关闭'}，审核者${settings.approvals.reviewer.autoApprove ? `开启（${Math.round(settings.approvals.reviewer.minConfidence * 100)}%）` : '关闭'}`} onClick={() => setView('settings')}><Check size={13} /><span>批准 · {automaticApprovals === 2 ? '自动' : automaticApprovals === 1 ? '1/2 自动' : '人工'}</span></button>
-            <button className={settings.memory.enabled ? 'topbar-setting-status memory-enabled' : 'topbar-setting-status disabled'} title={`长期记忆：${settings.memory.enabled ? `${settings.memory.provider === 'local' ? '本地' : '腾讯云'}${settings.memory.requireApproval ? ' · 写入需批准' : ' · 自动写入'}` : '已关闭'}`} onClick={() => setView('settings')}><Brain size={13} /><span>记忆 · {settings.memory.enabled ? settings.memory.provider === 'local' ? '本地' : '云端' : '关闭'}</span></button>
+            <button className={settings.verification.enabled ? 'topbar-setting-status enabled' : 'topbar-setting-status disabled'} title={`独立验证门禁：${settings.verification.enabled ? settings.verification.stopOnFailure ? '严格模式' : '已开启' : '已关闭'}`} onClick={() => openSettings('settings-verification')}><ShieldCheck size={13} /><span>门禁 · {settings.verification.enabled ? settings.verification.stopOnFailure ? '严格' : '开启' : '关闭'}</span></button>
+            <button className={`topbar-setting-status ${automaticApprovals === 2 ? 'enabled' : automaticApprovals === 1 ? 'partial' : 'disabled'}`} title={`自动批准：规划者${settings.approvals.planner.autoApprove ? `开启（${Math.round(settings.approvals.planner.minConfidence * 100)}%）` : '关闭'}，审核者${settings.approvals.reviewer.autoApprove ? `开启（${Math.round(settings.approvals.reviewer.minConfidence * 100)}%）` : '关闭'}`} onClick={() => openSettings('settings-approvals')}><Check size={13} /><span>批准 · {automaticApprovals === 2 ? '自动' : automaticApprovals === 1 ? '1/2 自动' : '人工'}</span></button>
+            <button className={settings.memory.enabled ? 'topbar-setting-status memory-enabled' : 'topbar-setting-status disabled'} title={`长期记忆：${settings.memory.enabled ? `${settings.memory.provider === 'local' ? '本地' : '腾讯云'}${settings.memory.requireApproval ? ' · 写入需批准' : ' · 自动写入'}` : '已关闭'}`} onClick={() => openSettings('settings-memory')}><Brain size={13} /><span>记忆 · {settings.memory.enabled ? settings.memory.provider === 'local' ? '本地' : '云端' : '关闭'}</span></button>
           </div>}
           <div className="topbar-actions">
             <button className={view === 'settings' ? 'topbar-tool topbar-settings active' : 'topbar-tool topbar-settings'} aria-label="打开设置" title="设置" onClick={() => setView('settings')}><Settings2 size={18} /></button>
             <button className="topbar-tool topbar-terminal" aria-label="打开命令行" title={`在终端打开 ${settings?.workspace ?? '当前工作目录'}`} onClick={() => void openTerminal()}><TerminalSquare size={18} /></button>
-            <span className="topbar-action-separator" aria-hidden="true" /><button className={view === 'workbench' && !deliveryInspectorCollapsed ? 'topbar-tool topbar-panel-toggle active' : 'topbar-tool topbar-panel-toggle'} aria-pressed={view === 'workbench' && !deliveryInspectorCollapsed} aria-label={view !== 'workbench' || deliveryInspectorCollapsed ? '展开运行与交付侧栏' : '收起运行与交付侧栏'} title={view !== 'workbench' || deliveryInspectorCollapsed ? '展开运行与交付侧栏' : '收起运行与交付侧栏'} onClick={toggleDeliveryInspector}>{view === 'workbench' && !deliveryInspectorCollapsed ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}</button>
+            <button className="topbar-new-task" onClick={newTask}><Plus size={15} />新任务</button>
           </div>
         </header>
 
-        {view === 'workbench' ? (
+        {!settings ? <div className="loading" role="status">正在载入项目与草稿…</div> : view === 'workbench' ? (
           <Workbench
-            settings={settings} selected={selected} running={Boolean(running)} events={events}
-            deliveryInspectorCollapsed={deliveryInspectorCollapsed}
+            settings={settings} selected={selected} running={Boolean(running)} events={events.filter((event) => event.runId === selectedId)}
+            active={workbenchTab} documents={documents.state} runs={runs} onDocument={changeDocument} onNewTask={newTask} onOpenProjects={() => setShowRepository(true)}
+            draft={draft} onDraft={updateDraft} draftSaveError={draftSaveError} recentRuns={runs.filter((run) => run.workspace === settings?.workspace).slice(0, 3)} onSelectRun={(id) => void openRun(id)} capabilities={capabilities}
             inspection={inspection} busy={busy}
-            title={title} objective={objective} onTitle={setTitle} onObjective={setObjective}
-            onStart={() => void startRun()} onStartGoal={(criteria) => void startGoalFromWorkbench(criteria)} onApprove={() => void approvePlan()}
+            title={title} objective={objective} onTitle={(value) => updateDraft({ title: value })} onObjective={(value) => updateDraft({ objective: value })}
+            onStart={() => void startRun()} onStartGoal={(criteria, budget) => void startGoalFromWorkbench(criteria, budget)} onApprove={() => void approvePlan()}
             onCancel={() => void cancelRun()} onPause={() => void pauseRun()} onResume={() => { if (selected) { setResumeTarget(selected); setResumeSupplement('') } }} onUpdateContract={(contract) => void updateContract(contract)} onInspect={() => void loadInspection()}
             onMerge={() => void mergeRun()} onDiscard={() => void discardRun()}
             onRetry={() => void retryRun()} onDelete={() => void deleteRun()}
@@ -599,17 +673,17 @@ export function App() {
             onRefreshRepository={() => void refreshRepository()} onOpenRemote={(url) => void openRepositoryRemote(url)}
           />
         ) : view === 'runs' ? (
-          <RunHistoryView runs={runs} onOpen={(id) => { setView('workbench'); void selectRun(id) }} onRetry={(run) => void retryRun(run)} onDelete={(run) => void deleteRun(run)} />
+          <RunHistoryView runs={runs} onOpen={(id) => { setView('workbench'); void openRun(id) }} onRetry={(run) => void retryRun(run)} onDelete={(run) => void deleteRun(run)} />
         ) : view === 'goals' && settings ? (
           <GoalView settings={settings} goals={goals} selected={selectedGoal} busy={busy}
-            onCreate={(input) => void createGoal(input)} onSelect={(id) => void refreshGoals(id)} onCommand={(command) => void commandGoal(command)}
-            onOpenRun={(id) => { setView('workbench'); void selectRun(id) }} />
+            onCreate={createGoal} onSelect={(id) => void refreshGoals(id)} onCommand={(command) => void commandGoal(command)}
+            onOpenRun={(id) => { setView('workbench'); void openRun(id) }} />
         ) : view === 'memory' && settings ? (
           <MemoryView entries={memories} runs={runs} activeWorkspace={settings.workspace} stats={memoryStats} health={memoryHealth} busy={busy}
-            onRefresh={() => void refreshMemories()} onDecide={(id, decision) => void decideMemory(id, decision)}
+            onRefresh={() => void refreshMemories()} onDecide={decideMemory} onCurate={curateMemories}
             onForget={(id) => void forgetMemory(id)} />
         ) : settings ? (
-          <AppSettingsView settings={settings} capabilities={capabilities} agentEnvironment={agentEnvironment} onChange={setSettings}
+          <AppSettingsView section={settingsSection} onSectionChange={setSettingsSection} settings={settings} capabilities={capabilities} agentEnvironment={agentEnvironment} onChange={setSettings}
             onRefreshEnvironment={() => void refreshAgentEnvironment()}
             onDesktop={(kind) => void handoffToDesktop(kind)} onProbeMemory={() => void probeMemorySettings()}
             onSetupTencentDb={() => void setupTencentDbMemory()} tencentDbSetupResult={tencentDbSetupResult}
@@ -617,7 +691,13 @@ export function App() {
         ) : <div className="loading">正在载入配置…</div>}
         {actionError && <div className="error-toast"><span>{actionError}</span><button onClick={() => setActionError('')}><X size={15} /></button></div>}
       </main>
-      {runMenu && <div ref={runMenuRef} className="run-context-menu" role="menu" aria-label={`${runMenu.run.title}任务操作`} style={{ left: Math.min(runMenu.x, window.innerWidth - 220), top: Math.min(runMenu.y, window.innerHeight - 210) }}><b title={runMenu.run.title}>{runMenu.run.title}</b><button onClick={() => { setView('workbench'); void selectRun(runMenu.run.id); setRunMenu(null) }}><FolderOpen size={14} />打开任务</button>{['queued', 'planning', 'implementing', 'verifying', 'reviewing'].includes(runMenu.run.status) && <button onClick={() => { void window.foreman.commandRun(runMenu.run.id, { type: 'pause' }).then(() => refreshRuns(runMenu.run.id)); setRunMenu(null) }}><Pause size={14} />中止并保留检查点</button>}{runMenu.run.status === 'paused' && <button onClick={() => { setResumeTarget(runMenu.run); setResumeSupplement(''); setRunMenu(null) }}><RotateCcw size={14} />补充内容并恢复</button>}{!['queued', 'planning', 'implementing', 'verifying', 'reviewing'].includes(runMenu.run.status) && <button className="danger" onClick={() => { void deleteRun(runMenu.run); setRunMenu(null) }}><Trash2 size={14} />删除任务</button>}</div>}
+      {settings && <dialog ref={projectPickerRef} className="project-picker" aria-label="项目详情与切换" onCancel={(event) => { event.preventDefault(); if (!busy) setShowRepository(false) }} onClick={(event) => { if (event.target === event.currentTarget && !busy) setShowRepository(false) }}>
+        <header><span><FolderGit2 size={18} /><b>项目详情与切换</b></span><button autoFocus className="quiet-button" disabled={Boolean(busy)} onClick={() => setShowRepository(false)} aria-label="关闭项目选择"><X size={17} /></button></header>
+        <div className="project-picker-content"><nav className="project-picker-list" aria-label="最近项目"><b>最近项目</b>{sidebarProjects.map((project) => <button key={project.workspace} title={project.workspace} aria-current={project.workspace === settings.workspace ? 'true' : undefined} disabled={Boolean(busy)} onClick={() => void switchWorkspace(project.workspace)}><FolderGit2 size={15} /><span><b>{workspaceName(project.workspace)}</b><small>{project.workspace}</small></span>{project.workspace === settings.workspace && <Check size={14} />}</button>)}</nav>
+        <RepositoryControl repository={repository} githubDelivery={githubDelivery} busy={busy} expanded onChoose={() => void chooseWorkspace()} onCloneGitHub={(url) => void cloneGitHubRepository(url)} onRefreshRepository={() => void refreshRepository()} onOpenRemote={(url) => void openRepositoryRemote(url)} />
+        </div>
+      </dialog>}
+      {runMenu && <div ref={runMenuRef} className="run-context-menu" role="menu" aria-label={`${runMenu.run.title}任务操作`} style={{ left: Math.min(runMenu.x, window.innerWidth - 220), top: Math.min(runMenu.y, window.innerHeight - 210) }}><b title={runMenu.run.title}>{runMenu.run.title}</b><button onClick={() => { setView('workbench'); void openRun(runMenu.run.id); setRunMenu(null) }}><FolderOpen size={14} />打开任务</button>{['queued', 'planning', 'implementing', 'verifying', 'reviewing'].includes(runMenu.run.status) && <button onClick={() => { void window.foreman.commandRun(runMenu.run.id, { type: 'pause' }).then(() => refreshRuns(runMenu.run.id)); setRunMenu(null) }}><Pause size={14} />中止并保留检查点</button>}{runMenu.run.status === 'paused' && <button onClick={() => { setResumeTarget(runMenu.run); setResumeSupplement(''); setRunMenu(null) }}><RotateCcw size={14} />补充内容并恢复</button>}{!['queued', 'planning', 'implementing', 'verifying', 'reviewing'].includes(runMenu.run.status) && <button className="danger" onClick={() => { void deleteRun(runMenu.run); setRunMenu(null) }}><Trash2 size={14} />删除任务</button>}</div>}
       {resumeTarget && <div className="approval-scrim"><section className="resume-panel" role="dialog" aria-modal="true" aria-label="补充内容并恢复任务"><header><span><RotateCcw size={18} /><span><small>RESUME FROM CHECKPOINT · 从检查点恢复</small><b>补充内容后继续原任务</b></span></span></header><div className="resume-context"><label><span>原任务描述</span><p>{resumeTarget.objective}</p></label>{resumeTarget.additionalInstructions && <label><span>此前补充内容</span><p>{resumeTarget.additionalInstructions}</p></label>}<label><span>本次新增内容（可留空）</span><textarea autoFocus value={resumeSupplement} onChange={(event) => setResumeSupplement(event.target.value)} placeholder="例如：保持现有接口不变，并优先修复登录状态恢复。新增内容会追加到原任务上下文，不会覆盖之前的要求。" /></label></div><footer><button className="quiet-button" onClick={() => { setResumeTarget(null); setResumeSupplement('') }}>取消</button><button className="primary" disabled={Boolean(busy)} onClick={() => void resumeRun()}><Play size={14} />从上个检查点继续</button></footer></section></div>}
     </div>
   </>)
@@ -641,7 +721,7 @@ function RunHistoryView({ runs, onOpen, onRetry, onDelete }: {
     }
   }, { duration: 0, tokens: 0, cost: 0 })
   return <div className="page run-history-page">
-    <div className="page-command-bar history-project-bar"><div><span className="page-command-icon"><FolderGit2 size={17} /></span><span><b>项目任务</b><small>运行记录始终归属于创建时选择的工作文件夹</small></span></div><label className="run-project-filter"><span>项目</span><select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}><option value="all">全部项目（{projects.length}）</option>{projects.map((workspace) => <option value={workspace} key={workspace}>{workspaceName(workspace)}</option>)}</select></label></div>
+    <div className="page-command-bar history-project-bar"><div><span className="page-command-icon"><FolderGit2 size={17} /></span><span><b>运行记录</b><small>按项目查看任务进度、成果与资源消耗</small></span></div><label className="run-project-filter"><span>项目</span><select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}><option value="all">全部项目（{projects.length}）</option>{projects.map((workspace) => <option value={workspace} key={workspace}>{workspaceName(workspace)}</option>)}</select></label></div>
     <div className="history-metrics"><div><b>{visibleRuns.length}</b><span>当前范围</span></div><div><b>{visibleRuns.filter((run) => run.status === 'completed').length}</b><span>已完成</span></div><div><b>{formatDuration(totals.duration)}</b><span>累计耗时</span></div><div><b>{formatTokenCount(totals.tokens)}</b><span>总 Token</span></div><div><b>${totals.cost.toFixed(3)}</b><span>已报告费用</span></div></div>
     <section className="run-history-list">
       <div className="run-history-head"><span>任务与状态</span><span>更新时间</span><span>耗时</span><span>Token</span><span>费用</span><span>操作</span></div>
@@ -663,41 +743,52 @@ function RunHistoryView({ runs, onOpen, onRetry, onDelete }: {
 
 function GoalView({ settings, goals, selected, busy, onCreate, onSelect, onCommand, onOpenRun }: {
   settings: AppSettings; goals: GoalSummary[]; selected: GoalDetail | null; busy?: string
-  onCreate: (input: import('../../shared/contracts').GoalInput) => void; onSelect:(id:string)=>void; onCommand:(command:GoalCommand)=>void; onOpenRun:(id:string)=>void
+  onCreate: (input: import('../../shared/contracts').GoalInput) => Promise<boolean>; onSelect:(id:string)=>void; onCommand:(command:GoalCommand)=>void; onOpenRun:(id:string)=>void
 }) {
   const [title,setTitle]=useState(''); const [objective,setObjective]=useState(''); const [criteria,setCriteria]=useState(''); const [constraints,setConstraints]=useState('')
-  const [priority,setPriority]=useState(50); const [hours,setHours]=useState(24); const [tokenBudget,setTokenBudget]=useState(2000000); const [costBudget,setCostBudget]=useState(0); const [maxIterations,setMaxIterations]=useState(24); const [maxAttempts,setMaxAttempts]=useState(2)
+  const [budget, setBudget] = useState<GoalBudget>({ ...defaultGoalBudget })
+  const goalTitleRef = useRef<HTMLInputElement>(null)
+  const createButtonRef = useRef<HTMLButtonElement>(null)
   const [creating, setCreating] = useState(false)
   const goal = selected?.goal
-  const submit=()=>{ const successCriteria=lines(criteria); if(!objective.trim()||!successCriteria.length)return; onCreate({ title:title.trim()||objective.trim().slice(0,40),objective:objective.trim(),workspace:settings.workspace,successCriteria,constraints:lines(constraints),priority,maxIterations,maxTaskAttempts:maxAttempts,timeBudgetSeconds:hours*3600,tokenBudget,...(costBudget>0?{costBudgetUsd:costBudget}:{}) }); setTitle('');setObjective('');setCriteria('');setConstraints('');setCreating(false) }
+  useEffect(() => { if (creating) goalTitleRef.current?.focus() }, [creating])
+  const missing = !objective.trim() ? '请填写最终目标' : !lines(criteria).length ? '请至少填写一项成功标准' : goalBudgetError(budget)
+  const submit=async ()=>{ const successCriteria=lines(criteria); if(missing)return;
+    const created = await onCreate({ title:title.trim()||objective.trim().slice(0,40),objective:objective.trim(),workspace:settings.workspace,successCriteria,constraints:lines(constraints),priority:50,...goalBudgetInput(budget) });
+    if (created) { setTitle('');setObjective('');setCriteria('');setConstraints('');setCreating(false);createButtonRef.current?.focus() }
+  }
+
   return <div className="page goal-page">
-    <div className="page-command-bar"><div><span className="page-command-icon"><Target size={17}/></span><span><b>长期目标</b><small>创建、跟踪并恢复持续交付目标</small></span></div><button className={creating ? 'quiet-button' : 'primary'} onClick={() => setCreating(!creating)}>{creating ? <><X size={14}/>取消创建</> : <><Target size={15}/>新建目标</>}</button></div>
+    <div className="page-command-bar"><div><span className="page-command-icon"><Target size={17}/></span><span><b>长期目标</b><small>创建、跟踪并恢复持续交付目标</small></span></div><button className={creating ? 'quiet-button' : 'primary'} ref={createButtonRef} onClick={() => { setCreating(!creating); if (creating) createButtonRef.current?.focus() }}>{creating ? <><X size={14}/>取消创建</> : <><Target size={15}/>新建目标</>}</button></div>
     {creating && <section className="goal-composer">
+      <p className="form-hint">适合分阶段交付、需要多次验证的工作。完成一次改动时，使用工作台的普通任务即可。</p>
       <div className="goal-fields">
-        <div><label><span>目标标题</span><input value={title} onChange={(event)=>setTitle(event.target.value)} /></label><label><span>最终目标</span><textarea value={objective} onChange={(event)=>setObjective(event.target.value)} /></label></div>
-        <div><label><span>成功标准（每行一项）</span><textarea value={criteria} onChange={(event)=>setCriteria(event.target.value)} /></label><label><span>约束（每行一项）</span><textarea value={constraints} onChange={(event)=>setConstraints(event.target.value)} /></label></div>
+        <div><label><span>目标标题（可选）</span><input ref={goalTitleRef} maxLength={160} value={title} onChange={(event)=>setTitle(event.target.value)} placeholder="例如：完成认证系统升级" /></label><label><span>最终目标（必填）</span><textarea required maxLength={20000} value={objective} onChange={(event)=>setObjective(event.target.value)} placeholder="例如：支持邮箱登录、刷新和注销，同时保持现有接口兼容。" /></label></div>
+        <div><label><span>成功标准（必填，每行一项）</span><textarea required value={criteria} onChange={(event)=>setCriteria(event.target.value)} placeholder={'例如：登录、刷新与注销测试全部通过\n刷新令牌重放会被拒绝'} /></label><label><span>约束（可选，每行一项）</span><textarea value={constraints} onChange={(event)=>setConstraints(event.target.value)} placeholder="例如：不修改现有公开接口；不引入付费依赖。" /></label></div>
       </div>
-      <div className="goal-controls">
-        <details className="goal-advanced"><summary>高级预算与循环</summary><div className="goal-budget"><label><span>优先级</span><input type="number" min="0" max="100" value={priority} onChange={(e)=>setPriority(Number(e.target.value))}/></label><label><span>小时预算</span><input type="number" min="1" value={hours} onChange={(e)=>setHours(Number(e.target.value))}/></label><label><span>Token 预算</span><input type="number" min="1000" value={tokenBudget} onChange={(e)=>setTokenBudget(Number(e.target.value))}/></label><label><span>费用预算 USD（0=不限）</span><input type="number" min="0" step="0.1" value={costBudget} onChange={(e)=>setCostBudget(Number(e.target.value))}/></label><label><span>最大循环</span><input type="number" min="1" max="100" value={maxIterations} onChange={(e)=>setMaxIterations(Number(e.target.value))}/></label><label><span>任务重试</span><input type="number" min="1" max="8" value={maxAttempts} onChange={(e)=>setMaxAttempts(Number(e.target.value))}/></label></div></details>
-        <button className="primary" disabled={Boolean(busy)||!objective.trim()||!lines(criteria).length} onClick={submit}><Target size={15}/>启动长期目标</button>
-      </div>
+      <GoalBudgetFields value={budget} onChange={setBudget} />
+      <div className="goal-controls"><span className="form-hint" id="goal-start-hint" role="status">{busy ? '正在创建，请稍候…' : missing || '目标和成功标准已填写，启动前请核对上述预算。'}</span><button className="primary" aria-describedby="goal-start-hint" disabled={Boolean(busy)||Boolean(missing)} onClick={() => void submit()}><Target size={15}/>启动长期目标</button></div>
     </section>}
-    <div className={goals.length ? 'goal-layout' : 'goal-layout empty'}><aside className="goal-list">{goals.map((item)=><button className={item.id===goal?.id?'selected':''} key={item.id} onClick={()=>onSelect(item.id)}><span className={`status-dot ${item.status}`}/><span><b>{item.title}</b><small>{item.status} · {item.iteration}/{item.maxIterations}</small></span></button>)}</aside>
-      <section className="goal-detail">{!goal?<div className="memory-empty"><Target size={28}/><b>创建第一个长期目标</b><span>每条成功标准会生成一个有依赖关系的任务节点。</span></div>:<><div className="goal-head"><div><span className="eyebrow">{goal.status}</span><h2>{goal.title}</h2><p>{goal.objective}</p></div><div className="goal-actions">{goal.status==='active'||goal.status==='waiting_approval'?<button className="quiet-button" onClick={()=>onCommand('pause')}><Pause size={13}/>暂停</button>:goal.status==='paused'?<button className="merge-button" onClick={()=>onCommand('resume')}><Play size={13}/>恢复</button>:null}{goal.status==='paused'&&goal.terminalReason?.includes('工作区变化')&&<button className="quiet-button" onClick={()=>onCommand('revalidate')}><ShieldCheck size={13}/>重新验证</button>}{!['completed','cancelled'].includes(goal.status)&&<button className="danger-button" onClick={()=>onCommand('cancel')}><CircleStop size={13}/>取消</button>}</div></div>
+    {(!creating || goals.length > 0) && <div className={goals.length ? 'goal-layout' : 'goal-layout empty'}><aside className="goal-list">{goals.map((item)=><button className={item.id===goal?.id?'selected':''} key={item.id} onClick={()=>onSelect(item.id)}><span className={`status-dot ${item.status}`}/><span><b>{item.title}</b><small>{item.status} · {item.iteration}/{item.maxIterations}</small></span></button>)}</aside>
+      <section className="goal-detail">{!goal?<div className="memory-empty"><Target size={28}/><b>把持续改进拆成可验收的阶段</b><span>例如：升级认证系统 → 登录测试通过 → 刷新令牌测试通过 → 兼容旧接口。</span><span>适合多阶段交付；一次性改动可在工作台发起普通任务。</span></div>:<><div className="goal-head"><div><span className="eyebrow">{goal.status}</span><h2>{goal.title}</h2><p>{goal.objective}</p></div><div className="goal-actions">{goal.status==='active'||goal.status==='waiting_approval'?<button className="quiet-button" onClick={()=>onCommand('pause')}><Pause size={13}/>暂停</button>:goal.status==='paused'?<button className="merge-button" onClick={()=>onCommand('resume')}><Play size={13}/>恢复</button>:null}{goal.status==='paused'&&goal.terminalReason?.includes('工作区变化')&&<button className="quiet-button" onClick={()=>onCommand('revalidate')}><ShieldCheck size={13}/>重新验证</button>}{!['completed','cancelled'].includes(goal.status)&&<button className="danger-button" onClick={()=>onCommand('cancel')}><CircleStop size={13}/>取消</button>}</div></div>
         <div className="goal-metrics"><div><b>{goal.iteration}</b><span>循环次数</span></div><div><b>{selected.tasks.filter((task)=>task.status==='completed').length}/{selected.tasks.length}</b><span>成功标准</span></div><div><b>{goal.timeBudgetSeconds?`${Math.round(goal.timeBudgetSeconds/3600)}h`:'∞'}</b><span>时间预算</span></div><div><b>{Math.round(goal.tokensUsed/1000)}k</b><span>Token 用量</span></div><div><b>${goal.costUsedUsd.toFixed(2)}</b><span>费用用量</span></div></div>
         {goal.terminalReason&&<div className="goal-reason"><ShieldCheck size={15}/>{goal.terminalReason}{goal.status==='blocked'&&<button className="quiet-button" onClick={()=>onCommand('replan')}><RotateCcw size={13}/>重新规划</button>}</div>}
         <div className="task-graph">{selected.tasks.map((task,index)=><article className={task.status} key={task.id}><div className="task-index">{String(index+1).padStart(2,'0')}</div><div><span>{task.status}</span><h3>{task.title}</h3><p>{task.objective.split('\n')[2]??task.objective}</p><small>尝试 {task.attempt}/{task.maxAttempts}{task.dependencies.length?` · 依赖 ${task.dependencies.length} 项`:''}</small></div>{task.runId&&<button className="quiet-button" onClick={()=>onOpenRun(task.runId!)}>打开任务</button>}</article>)}</div></>}</section>
-    </div>
+    </div>}
   </div>
 }
 
 function Workbench(props: {
   settings: AppSettings | null; selected?: RunSummary; running: boolean; events: RunEvent[]
-  deliveryInspectorCollapsed: boolean
+  active: 'draft' | 'run' | 'empty'; documents: WorkspaceDocuments; runs: RunSummary[]
+  onDocument: (action: import('./workspace-documents').DocumentAction) => void; onNewTask: () => void
+  onOpenProjects: () => void
+  draft: TaskDraft; onDraft: (patch: Partial<TaskDraft>) => void; draftSaveError: boolean
+  recentRuns: RunSummary[]; onSelectRun: (id: string) => void; capabilities: ExecutorCapability[]
   inspection: WorkspaceInspection | null; busy?: string
   deliveryGuide: DeliveryGuide | null
   title: string; objective: string; onTitle: (value: string) => void; onObjective: (value: string) => void
-  onStart: () => void; onStartGoal: (successCriteria: string[]) => void; onApprove: () => void; onCancel: () => void; onInspect: () => void
+  onStart: () => void; onStartGoal: (successCriteria: string[], budget: GoalBudget) => void; onApprove: () => void; onCancel: () => void; onInspect: () => void
   onPause: () => void; onResume: () => void; onUpdateContract: (contract: import('../../shared/contracts').ExecutionContract) => void
   onMerge: () => void; onDiscard: () => void; onRetry: () => void; onDelete: () => void; onOpen: () => void
   onDeliveryStep: (action: DeliveryGuideAction) => void; onDeliveryRefresh: () => void; onDeliveryClose: () => void
@@ -711,21 +802,17 @@ function Workbench(props: {
   onConfigureWorkflow: () => void
 }) {
   const { settings, selected, events } = props
-  const [taskMode, setTaskMode] = useState<'run' | 'goal'>('run')
-  const [goalCriteria, setGoalCriteria] = useState('')
-  const [runTab, setRunTab] = useState<'overview' | 'plan' | 'evidence' | 'resources' | 'logs'>('overview')
+  const { mode: taskMode, criteria: goalCriteria, budget: goalBudget } = props.draft
+  const setTaskMode = (mode: 'run' | 'goal') => props.onDraft({ mode })
+  const setGoalCriteria = (criteria: string) => props.onDraft({ criteria })
+  const setGoalBudget = (budget: GoalBudget) => props.onDraft({ budget })
+  const [runTab, setRunTab] = useState<'overview' | 'plan' | 'evidence' | 'resources' | 'logs' | 'delivery'>('overview')
   const [logFilter, setLogFilter] = useState<'progress' | 'model' | 'all'>('progress')
   const [approvalOpen, setApprovalOpen] = useState(false)
   const [approvalMinimized, setApprovalMinimized] = useState(false)
   const [focusedMetric, setFocusedMetric] = useState<RunStageMetric | null>(null)
   const [gitConfirmation, setGitConfirmation] = useState('')
   const deliveryGuideRequested = useRef<string | undefined>(undefined)
-  const topAnchor = useRef<HTMLDivElement>(null)
-  const repositoryAnchor = useRef<HTMLDivElement>(null)
-  const composerAnchor = useRef<HTMLElement>(null)
-  const runAnchor = useRef<HTMLElement>(null)
-  const jumpTo = (target: RefObject<HTMLElement | HTMLDivElement | null>) => target.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  const stages = useMemo(() => pipelineStages(selected?.status, selected?.checkpointPhase), [selected?.status, selected?.checkpointPhase])
   const resolution = selected?.resolution ?? 'open'
   const canDiscard = selected && ['awaiting_approval', 'completed', 'cancelled'].includes(selected.status) && resolution === 'open'
   const resourceTotals = useMemo(() => (selected?.stageMetrics ?? []).reduce((sum, metric) => ({
@@ -738,11 +825,10 @@ function Workbench(props: {
     return at >= new Date(focusedMetric.startedAt).getTime() - 1000 && at <= new Date(focusedMetric.completedAt).getTime() + 1000
   }) : events, [events, focusedMetric])
   const visibleEventGroups = useMemo(() => groupRunEvents(focusedEvents, logFilter), [focusedEvents, logFilter])
-  const activeStage = stages.find((stage) => stage.state === 'active') ?? stages.find((stage) => stage.state !== 'done') ?? stages[stages.length - 1]
   useEffect(() => {
     const savedTab = selected?.id ? window.sessionStorage.getItem(`foreman:run-tab:${selected.id}`) as typeof runTab | null : null
     const savedFilter = selected?.id ? window.sessionStorage.getItem(`foreman:log-filter:${selected.id}`) as typeof logFilter | null : null
-    setRunTab(selected?.status === 'awaiting_approval' ? 'plan' : savedTab && ['overview', 'plan', 'evidence', 'resources', 'logs'].includes(savedTab) ? savedTab : 'overview')
+    setRunTab(selected?.status === 'awaiting_approval' ? 'plan' : savedTab && ['overview', 'plan', 'evidence', 'resources', 'logs', 'delivery'].includes(savedTab) ? savedTab : 'overview')
     if (savedFilter && ['progress', 'model', 'all'].includes(savedFilter)) setLogFilter(savedFilter)
     const waiting = selected?.status === 'awaiting_approval' || selected?.status === 'awaiting_review_approval'
     setApprovalOpen(Boolean(waiting)); setApprovalMinimized(false)
@@ -759,42 +845,32 @@ function Workbench(props: {
     props.onDeliveryRefresh()
   }, [selected?.id, selected?.status, resolution, props.deliveryGuide])
   useEffect(() => { setGitConfirmation('') }, [props.gitOperationPlan?.id])
-  return (
-    <div className={`page workbench ${props.deliveryInspectorCollapsed ? 'delivery-rail-collapsed' : ''}`} ref={topAnchor}>
-
-      <nav className="workbench-jumpbar" aria-label="工作台快速定位">
-        <button aria-label="定位项目" title="项目与交付" onClick={() => jumpTo(repositoryAnchor)}><span className="jumpbar-icon project"><FolderGit2 size={17} /></span></button>
-        <button aria-label="定位新任务" title="发起新任务" onClick={() => jumpTo(composerAnchor)}><span className="jumpbar-icon composer"><TerminalSquare size={17} /></span></button>
-        <button aria-label="定位当前运行" title="当前运行" onClick={() => jumpTo(runAnchor)}><span className="jumpbar-icon run"><Activity size={17} /></span></button>
-        <button className="jumpbar-top" aria-label="回到顶部" title="回到顶部" onClick={() => jumpTo(topAnchor)}><span className="jumpbar-icon top"><ArrowUp size={17} /></span></button>
-      </nav>
-
-      <div className="workbench-layout">
-        <div className="workbench-canvas">
-      <div className="section-anchor" ref={repositoryAnchor}><RepositoryControl {...props} /></div>
-
-      <section className="composer-card workbench-surface section-anchor" ref={composerAnchor}>
-        <div className="composer-head"><div className="icon-well"><TerminalSquare size={20} /></div><div><b>发起新任务</b><span>描述最终结果，编排器会完成计划、实现与审核</span></div></div>
-        <div className="task-kind-selector" role="tablist" aria-label="任务运行方式"><button role="tab" aria-selected={taskMode === 'run'} className={taskMode === 'run' ? 'selected' : ''} onClick={() => setTaskMode('run')}><Play size={13} />普通任务<span>完成一次交付闭环</span></button><button role="tab" aria-selected={taskMode === 'goal'} className={taskMode === 'goal' ? 'selected' : ''} onClick={() => setTaskMode('goal')}><Target size={13} />长期目标<span>持续拆解、循环与恢复</span></button></div>
-        <div className="composer-input-stack">
-          <input className="title-input" value={props.title} onChange={(event) => props.onTitle(event.target.value)} placeholder="任务标题（可选）" />
-          <textarea className="composer-objective" value={props.objective} onChange={(event) => props.onObjective(event.target.value)} placeholder={taskMode === 'goal' ? '例如：持续完成认证系统升级，直到所有成功标准均通过验证……' : '例如：为当前项目增加基于邮箱的登录，并补充集成测试……'} />
-        </div>
-        {taskMode === 'goal' && <label className="goal-criteria-field"><span><b>成功标准</b><small>每行一项；Goal Engine 会据此生成可验证的任务节点。</small></span><textarea value={goalCriteria} onChange={(event) => setGoalCriteria(event.target.value)} placeholder={'例如：\n登录、刷新与注销测试全部通过\n刷新令牌重放会被拒绝\n现有公开接口保持兼容'} /></label>}
-        <div className="composer-foot">
-          <div className="role-chips">
-            {settings && (Object.keys(roleMeta) as RoleKey[]).map((key) => <RoleChip key={key} role={key} config={settings.roles[key]} />)}
-          </div>
-          <div className="composer-submit"><span><b>{taskMode === 'goal' ? '启动长期目标' : '准备开始'}</b><small>{taskMode === 'goal' ? '目标将持续运行，并在每个可验证节点经过实现、审核与交付。' : '将在当前项目创建隔离 worktree，并按上述角色推进任务。'}</small></span><div className="composer-submit-actions"><button className="workflow-settings-shortcut" aria-label="设置角色与流程" title="前往设置中的角色与流程" onClick={props.onConfigureWorkflow}><Settings2 size={15} />角色与流程</button><button className="primary" disabled={!props.objective.trim() || (taskMode === 'goal' && !goalCriteria.split('\n').some((item) => item.trim()))} onClick={() => taskMode === 'goal' ? props.onStartGoal(goalCriteria.split('\n').map((item) => item.trim()).filter(Boolean)) : props.onStart()}>{taskMode === 'goal' ? <Target size={16} /> : <Play size={16} fill="currentColor" />}{taskMode === 'goal' ? '启动长期目标' : '开始编排'}</button></div></div>
-        </div>
-      </section>
-
-      <section className="run-card workbench-surface section-anchor" ref={runAnchor}>
+  const deliveryContent = selected && settings && selected.workspace !== settings.workspace ? (
+    <div className="delivery-project-mismatch"><b>此任务属于 {workspaceName(selected.workspace)}</b><p>当前连接的是 {workspaceName(settings.workspace)}。交付前请切换到任务项目，避免把操作应用到其他仓库。</p><button className="quiet-button" onClick={props.onOpenProjects}>切换项目</button></div>
+  ) : (
+          <section className="inspector-card delivery-inspector">
+            <div className="inspector-heading"><span><small>DELIVERY GUIDE · 交付向导</small><b>{resolution === 'merged' ? '已交付到源项目' : resolution === 'discarded' ? '已放弃' : props.deliveryGuide ? '按向导完成当前步骤' : '交付准备'}</b></span><GitMerge size={17} /></div>
+            {selected?.executionWorkspace ? <div className="delivery-toolbar inspector-toolbar">
+              <div className="delivery-location"><FolderGit2 size={15} /><span><b>{resolution === 'open' ? '任务 worktree' : '交付记录'}</b>{resolution === 'open' ? <small title={selected.executionWorkspace}>{selected.executionWorkspace}</small> : <details><summary>查看历史工作区路径</summary><small>{selected.executionWorkspace}</small></details>}</span></div>
+              <div className="delivery-actions">
+                {resolution === 'open' && <button className="quiet-button" onClick={props.onOpen}><FolderOpen size={14} />打开</button>}
+                {resolution === 'open' && props.agentEnvironment.desktops.filter((desktop) => desktop.installed).map((desktop) => <button className="quiet-button desktop-button" key={desktop.kind} onClick={() => props.onDesktop(desktop.kind)}><Monitor size={14} />{desktop.kind === 'codex' ? 'Codex' : 'Claude'}</button>)}
+                {resolution === 'open' && <button className="quiet-button" disabled={props.busy === 'diff'} onClick={props.onInspect}>{props.busy === 'diff' ? <LoaderCircle className="spin" size={14} /> : <FileDiff size={14} />}刷新证据</button>}
+                {canDiscard && <button className="danger-button" disabled={Boolean(props.busy)} onClick={props.onDiscard}><Trash2 size={14} />放弃</button>}
+                {resolution !== 'open' && <span className={`resolution-badge ${resolution}`}>{resolution === 'merged' ? '已合并并清理' : '已放弃并清理'}</span>}
+              </div>
+            </div> : <div className="delivery-rail-empty"><FolderGit2 size={20} /><b>尚未创建任务 worktree</b><span>连接项目并启动任务后，这里会显示隔离路径与交付操作。</span></div>}
+            <RepositoryPublishGuide repository={props.repository} githubDelivery={props.githubDelivery} resolution={resolution} deliveryGuide={props.deliveryGuide} plan={props.gitOperationPlan} busy={props.busy} confirmation={gitConfirmation} onConfirmation={setGitConfirmation} onPreview={props.onPreviewRepositoryPush} onPreviewPublish={props.onPreviewRepositoryPublish} onExecute={() => props.onExecuteRepositoryPush(gitConfirmation)} onCancel={props.onCancelGitOperation} onOpenRemote={props.onOpenRemote} onOpenLocalGuide={props.onDeliveryRefresh} onOpenRepository={props.onOpenProjects} onOpenResult={props.onOpen} onRefresh={props.onRefreshRepository} onLocalStep={props.onDeliveryStep} onAdvanceLocalDelivery={props.onAdvanceLocalDelivery} onAutoLocalDelivery={props.onAutoLocalDelivery} />
+            <div className="repository-rail-summary"><span><GitBranch size={13} /><span><b>{props.repository.branch || '未连接分支'}</b><small>{props.repository.connected ? `${props.repository.unstaged + props.repository.staged + props.repository.untracked} 项本地改动` : '打开本地项目或从 GitHub 克隆'}</small></span></span><button title="刷新 Git、PR 与 CI/CD 状态" onClick={props.onRefreshRepository}><RefreshCw size={13} /></button></div>
+          </section>
+  )
+  const runContent = (
+      <section className="run-card workbench-surface" id="workspace-run-panel" role="tabpanel" aria-labelledby={workspaceTabId(props.documents.activeId)}>
         <div className="card-heading">
-          <div><span className="eyebrow">CURRENT RUN</span><h2>{selected?.title ?? '等待第一个任务'}</h2></div>
+          <div><span className="eyebrow">当前任务</span><h2>{selected?.title ?? '等待第一个任务'}</h2></div>
           {selected && <div className="run-actions">
             {selected.branch && <span className="branch-badge" title={selected.branch}><FolderGit2 size={12} />{selected.branch}</span>}
-            <span className={`status-badge ${selected.status}`}>{statusLabel[selected.status]}</span>
+            <span className={`status-badge ${selected.status}`}>{resolution === 'merged' ? '已交付' : resolution === 'discarded' ? '已放弃' : statusLabel[selected.status]}</span>
             {props.running && <button className="run-control-button stop" disabled={Boolean(props.busy)} onClick={props.onPause}><Pause size={14} />中止并保留检查点</button>}
             {selected.status === 'paused' && <button className="run-control-button resume" disabled={Boolean(props.busy)} onClick={props.onResume}><RotateCcw size={14} />补充并恢复</button>}
           </div>}
@@ -804,7 +880,7 @@ function Workbench(props: {
           <button className="primary" onClick={() => { setApprovalOpen(true); setApprovalMinimized(false) }}><Check size={16} />检查并批准</button>
         </div>}
         {selected?.status === 'awaiting_review_approval' && <div className="approval-banner review-approval-banner">
-          <div><ShieldCheck size={18} /><span><b>审核等待确认</b><small>审核结论与验证证据已就绪，请在右侧交付区确认交付或返工。</small></span></div>
+          <div><ShieldCheck size={18} /><span><b>审核等待确认</b><small>审核结论与验证证据已就绪，请打开审核确认，决定交付或返工。</small></span></div>
           <button className="primary" onClick={() => { setApprovalOpen(true); setApprovalMinimized(false) }}><Check size={16} />打开审核确认</button>
         </div>}
         {selected?.status === 'paused' && <div className="run-recovery-banner">
@@ -819,21 +895,20 @@ function Workbench(props: {
           </div>
         </div>}
         {selected && <AgentTaskPanel run={selected} />}
-        <button className="run-resource-summary" onClick={() => setRunTab('resources')}>
-          <span><Gauge size={17} /><span><b>步骤耗时与资源</b><small>查看每个模型与本地验证步骤的消耗</small></span></span>
-          <span className="run-resource-totals"><span><b>{formatDuration(resourceTotals.duration)}</b><small>耗时</small></span><span><b>{formatTokenCount(resourceTotals.tokens)}</b><small>Token</small></span><span><b>${resourceTotals.cost.toFixed(3)}</b><small>费用</small></span><ChevronRight size={15} /></span>
-        </button>
+        {selected && <TaskProgress run={selected} />}
+        <button className="run-resource-compact" onClick={() => setRunTab('resources')} aria-label="查看步骤耗时与资源"><Gauge size={14} />{formatDuration(resourceTotals.duration)}<span>·</span>{formatTokenCount(resourceTotals.tokens)} Token<span>·</span>${resourceTotals.cost.toFixed(3)}<ChevronRight size={14} /></button>
         <div className="run-detail-layout">
           <div className="run-tabs" role="tablist" aria-label="当前运行详情">
-            {([['overview', '概览', <LayoutDashboard size={15} />], ['plan', '计划', <Workflow size={15} />], ['evidence', '证据', <ShieldCheck size={15} />], ['resources', '资源', <Gauge size={15} />], ['logs', '日志', <Activity size={15} />]] as const).map(([key, label, icon]) => <button role="tab" aria-selected={runTab === key} className={runTab === key ? 'selected' : ''} key={key} onClick={() => setRunTab(key)}>{icon}<span>{label}</span></button>)}
+            {([['overview', '成果', <LayoutDashboard size={15} />], ['plan', '计划', <Workflow size={15} />], ['evidence', '变更', <ShieldCheck size={15} />], ['resources', '资源', <Gauge size={15} />], ['logs', '日志', <Activity size={15} />], ['delivery', '交付', <GitMerge size={15} />]] as const).map(([key, label, icon]) => <button role="tab" aria-selected={runTab === key} className={runTab === key ? 'selected' : ''} key={key} onClick={() => setRunTab(key)}>{icon}<span>{label}</span></button>)}
           </div>
           <div className={`run-tab-panel tab-${runTab}`} key={runTab} role="tabpanel" aria-live="polite">
-          {runTab === 'overview' && <div className="artifact-panel run-overview-grid"><Artifact title="任务计划" content={selected?.plan} /><Artifact title="审核结果" content={selected?.review || selected?.error} /></div>}
+          {runTab === 'delivery' && deliveryContent}
+          {runTab === 'overview' && <RunOverview run={selected} onOpenProject={props.onOpen} onEvidence={() => setRunTab('evidence')} />}
           {runTab === 'plan' && <>
-            {selected?.status === 'awaiting_approval' && selected.contract ? <ContractEditor contract={selected.contract} busy={props.busy === 'contract'} onSave={props.onUpdateContract} /> : <Artifact title="执行计划" content={selected?.plan} />}
+            {selected?.status === 'awaiting_approval' && selected.contract ? <ContractEditor contract={selected.contract} busy={props.busy === 'contract'} onSave={props.onUpdateContract} /> : <ContractSummary contract={selected?.contract} raw={selected?.plan} />}
           </>}
           {runTab === 'evidence' && <div className="evidence-stack">
-            {selected?.executionWorkspace && resolution === 'open' ? <DiffPanel inspection={props.inspection} loading={props.busy === 'diff'} /> : <div className="diff-empty">运行产生可检查的隔离工作区后，这里会显示变更证据。</div>}
+            {selected?.executionWorkspace && resolution === 'open' ? <DiffPanel inspection={props.inspection} loading={props.busy === 'diff'} /> : <div className="diff-empty resolved-evidence"><b>{resolution === 'merged' ? '任务已合并，隔离工作区已清理' : resolution === 'discarded' ? '任务已放弃，隔离工作区已清理' : '尚未创建可检查的工作区'}</b><span>{resolution === 'merged' ? '源项目保留交付成果；此处不再读取已清理的工作区。' : resolution === 'discarded' ? '本任务没有交付到源项目。' : '执行开始后将显示变更证据。'}</span>{selected?.deliveryEvidence ? <><code>提交 {selected.deliveryEvidence.commit}</code><ul>{selected.deliveryEvidence.changedFiles.map((file) => <li key={file}>{file}</li>)}</ul></> : resolution === 'merged' && <span>这条历史记录未保存交付快照，请在源项目中查看 Git 历史。</span>}{resolution === 'merged' && <button className="quiet-button" onClick={props.onOpen}>打开成果目录</button>}</div>}
             {selected?.verification ? <VerificationPanel report={selected.verification} /> : <div className="diff-empty">独立验证完成后，这里会显示命令、退出码与工作区指纹。</div>}
           </div>}
           {runTab === 'resources' && <RunResourceLedger run={selected} onInspect={(metric) => { setFocusedMetric(metric); setLogFilter('all'); setRunTab('logs') }} />}
@@ -850,40 +925,42 @@ function Workbench(props: {
           </div>
         </div>
       </section>
+  )
+  return (
+    <div className="page workbench document-workbench">
+      <WorkspaceTabs tabs={props.documents.tabs.map((tab) => ({ id: tab.id, kind: tab.kind, title: tab.kind === 'draft' ? tab.draft.title.trim() || '新任务' : props.runs.find((run) => run.id === tab.runId)?.title || '任务记录', hasDraft: tab.kind === 'draft' && hasDraftContent(tab.draft) }))} activeId={props.documents.activeId} closedDrafts={props.documents.closedDrafts.map((tab) => ({ id: tab.id, title: tab.draft.title.trim() || tab.draft.objective.trim().slice(0, 36) || '新任务' }))} onSelect={(id) => props.onDocument({ type: 'select', id })} onClose={(id) => props.onDocument({ type: 'close', id })} onRestore={(id) => props.onDocument({ type: 'restore', id })} onNew={props.onNewTask} />
+      <div className="workbench-document-body">
+
+        {props.active === 'empty' ? <section className="workspace-empty"><TerminalSquare size={28} /><h1>开始新的工作</h1><p>打开已有任务，或新建一个独立任务页签。关闭的草稿可从上方恢复。</p><button className="primary" onClick={props.onNewTask}><Plus size={15} />新任务</button></section> : props.active === 'run' ? selected ? runContent : <div role="status" className="loading">正在载入任务…</div> : <>
+      <section className="composer-card workbench-surface" data-task-mode={taskMode} id="workspace-draft-panel" role="tabpanel" aria-labelledby={workspaceTabId(props.documents.activeId)}>
+        <div className="composer-head"><div><b>开始一个新任务</b></div></div>
+        <div className="task-kind-selector" role="tablist" aria-label="任务运行方式"><button role="tab" aria-selected={taskMode === 'run'} className={taskMode === 'run' ? 'task-kind-run selected' : 'task-kind-run'} onClick={() => setTaskMode('run')}><Play size={13} />普通任务<span>完成一次交付闭环</span></button><button role="tab" aria-selected={taskMode === 'goal'} className={taskMode === 'goal' ? 'task-kind-goal selected' : 'task-kind-goal'} onClick={() => setTaskMode('goal')}><Target size={13} />长期目标<span>持续拆解、循环与恢复</span></button></div>
+        <div className="task-mode-hint" role="note" aria-live="polite">{taskMode === 'goal' ? <Target size={20} /> : <Play size={20} />}<span><b>{taskMode === 'goal' ? '长期目标 · 分阶段持续交付' : '普通任务 · 完成一次明确的改动'}</b><small>{taskMode === 'goal' ? '填写最终目标与逐行成功标准，Foreman 会在预算范围内持续推进。' : '描述预期结果与验收要求，Foreman 会依次规划、实现和审核。'}</small></span></div>
+        <div className="composer-input-stack">
+          <label className="draft-field"><span>任务标题（可选）</span><input className="title-input" value={props.title} onChange={(event) => props.onTitle(event.target.value)} placeholder="输入任务标题，让任务更清晰" /></label>
+          <label className="draft-field"><span>任务描述（必填）</span><textarea className="composer-objective" value={props.objective} onChange={(event) => props.onObjective(event.target.value)} placeholder={taskMode === 'goal' ? '例如：持续完成认证系统升级，直到所有成功标准均通过验证……' : '例如：为当前项目增加基于邮箱的登录，并补充集成测试……'} /></label>
         </div>
+        {taskMode === 'goal' && <div className="draft-goal-fields"><label className="goal-criteria-field"><span><b>成功标准</b><small>每行一个可检查的结果；例如“登录测试全部通过”。</small></span><textarea value={goalCriteria} onChange={(event) => setGoalCriteria(event.target.value)} placeholder={'例如：\n登录、刷新与注销测试全部通过\n刷新令牌重放会被拒绝\n现有公开接口保持兼容'} /></label>
+          <GoalBudgetFields value={goalBudget} onChange={setGoalBudget} />
+        </div>}
+        {settings && (Object.keys(roleMeta) as RoleKey[]).some((role) => settings.roles[role].executor !== 'custom' && executorReadiness(settings.roles[role].executor, props.capabilities).state !== 'available') && <p className="draft-environment-warning"><ShieldCheck size={14} />部分执行器尚未就绪，请在开始前检查<button onClick={props.onConfigureWorkflow}>角色与运行环境</button>。</p>}
+        <div className="composer-foot">
+          <div className="draft-configuration">
+          <div className="draft-context"><FolderGit2 size={15} /><span>项目上下文</span><b>{settings ? workspaceName(settings.workspace) : '正在载入项目'}</b><small>独立工作区</small><button className="quiet-button" onClick={props.onOpenProjects}>切换项目</button></div>
+          <details className="draft-role-details"><summary>角色与流程 <span>规划 → 实现 → 审核</span></summary><div className="role-chips">{settings && (Object.keys(roleMeta) as RoleKey[]).map((key) => <RoleChip key={key} role={key} config={settings.roles[key]} />)}</div><button className="quiet-button" onClick={props.onConfigureWorkflow}>设置角色与流程</button></details>
+          </div>
+          <div className="composer-submit"><span><b>{props.draftSaveError ? '草稿仅保留在当前窗口' : props.objective || props.title || goalCriteria ? '草稿已保存到本机' : '独立创建新任务'}</b><small>{taskMode === 'goal' ? '目标将持续运行，并在每个可验证节点经过实现、审核与交付。' : '将在当前项目创建隔离 worktree，并按上述角色推进任务。'}</small></span><div className="composer-submit-actions"><button className="workflow-settings-shortcut" aria-label="设置角色与流程" title="前往设置中的角色与流程" onClick={props.onConfigureWorkflow}><Settings2 size={15} />角色与流程</button><button className="primary" disabled={Boolean(props.busy) || !settings || !props.objective.trim() || (taskMode === 'goal' && (!goalCriteria.split('\n').some((item) => item.trim()) || Boolean(goalBudgetError(goalBudget))))} onClick={() => taskMode === 'goal' ? props.onStartGoal(goalCriteria.split('\n').map((item) => item.trim()).filter(Boolean), goalBudget) : props.onStart()}>{taskMode === 'goal' ? <Target size={16} /> : <Play size={16} fill="currentColor" />}{props.busy === 'start' || props.busy === 'goal-create' ? '正在创建…' : taskMode === 'goal' ? '启动长期目标' : '开始任务'}</button></div></div>
+        </div>
+      </section>
 
-        {!props.deliveryInspectorCollapsed && <aside className="workbench-inspector" aria-label="运行进度与交付向导">
-          {selected && (selected.status === 'awaiting_approval' || selected.status === 'awaiting_review_approval') && <button className="approval-dock" onClick={() => { setApprovalOpen(true); setApprovalMinimized(false) }}><ShieldCheck size={16} /><span><b>{selected.status === 'awaiting_approval' ? '规划等待批准' : '审核等待批准'}</b><small>{approvalMinimized ? '已缩小，点击展开确认' : '需要你的确认才能继续'}</small></span><ChevronRight size={14} /></button>}
-          <section className="inspector-card stage-inspector">
-            <div className="inspector-heading"><span><small>NOW · 当前阶段</small><b>{selected ? activeStage.label : '等待任务'}</b></span>{selected && <span className={`inspector-status ${selected.status}`}>{statusLabel[selected.status]}</span>}</div>
-            <p>{selected ? activeStage.detail : '发起任务后，规划、执行、审核与交付进度会固定显示在这里。'}</p>
-            <div className="stage-progress-list">
-              {stages.map((stage) => <div className={`stage-progress-item ${stage.state}`} key={stage.label}>
-                <span className="stage-progress-icon">{stage.state === 'done' ? <Check size={14} /> : stage.icon}</span>
-                <span><small>{stage.index}</small><b>{stage.label}</b><em>{stage.detail}</em></span>
-              </div>)}
-            </div>
-            <button className="inspector-resource" onClick={() => setRunTab('resources')}><Gauge size={15} /><span><b>{formatDuration(resourceTotals.duration)}</b><small>{formatTokenCount(resourceTotals.tokens)} Token · ${resourceTotals.cost.toFixed(3)}</small></span><ChevronRight size={14} /></button>
-          </section>
-
-          <section className="inspector-card delivery-inspector">
-            <div className="inspector-heading"><span><small>DELIVERY GUIDE · 交付向导</small><b>{props.deliveryGuide ? '按向导完成当前步骤' : '交付准备'}</b></span><GitMerge size={17} /></div>
-            {selected?.executionWorkspace ? <div className="delivery-toolbar inspector-toolbar">
-              <div className="delivery-location"><FolderGit2 size={15} /><span><b>任务 worktree</b><small title={selected.executionWorkspace}>{selected.executionWorkspace}</small></span></div>
-              <div className="delivery-actions">
-                {resolution === 'open' && <button className="quiet-button" onClick={props.onOpen}><FolderOpen size={14} />打开</button>}
-                {resolution === 'open' && props.agentEnvironment.desktops.filter((desktop) => desktop.installed).map((desktop) => <button className="quiet-button desktop-button" key={desktop.kind} onClick={() => props.onDesktop(desktop.kind)}><Monitor size={14} />{desktop.kind === 'codex' ? 'Codex' : 'Claude'}</button>)}
-                {resolution === 'open' && <button className="quiet-button" disabled={props.busy === 'diff'} onClick={props.onInspect}>{props.busy === 'diff' ? <LoaderCircle className="spin" size={14} /> : <FileDiff size={14} />}刷新证据</button>}
-                {canDiscard && <button className="danger-button" disabled={Boolean(props.busy)} onClick={props.onDiscard}><Trash2 size={14} />放弃</button>}
-                {resolution !== 'open' && <span className={`resolution-badge ${resolution}`}>{resolution === 'merged' ? '已合并并清理' : '已放弃并清理'}</span>}
-              </div>
-            </div> : <div className="delivery-rail-empty"><FolderGit2 size={20} /><b>尚未创建任务 worktree</b><span>连接项目并启动任务后，这里会显示隔离路径与交付操作。</span></div>}
-            <RepositoryPublishGuide repository={props.repository} githubDelivery={props.githubDelivery} resolution={resolution} deliveryGuide={props.deliveryGuide} plan={props.gitOperationPlan} busy={props.busy} confirmation={gitConfirmation} onConfirmation={setGitConfirmation} onPreview={props.onPreviewRepositoryPush} onPreviewPublish={props.onPreviewRepositoryPublish} onExecute={() => props.onExecuteRepositoryPush(gitConfirmation)} onCancel={props.onCancelGitOperation} onOpenRemote={props.onOpenRemote} onOpenLocalGuide={props.onDeliveryRefresh} onOpenRepository={() => jumpTo(repositoryAnchor)} onRefresh={props.onRefreshRepository} onLocalStep={props.onDeliveryStep} onAdvanceLocalDelivery={props.onAdvanceLocalDelivery} onAutoLocalDelivery={props.onAutoLocalDelivery} />
-            <div className="repository-rail-summary"><span><GitBranch size={13} /><span><b>{props.repository.branch || '未连接分支'}</b><small>{props.repository.connected ? `${props.repository.unstaged + props.repository.staged + props.repository.untracked} 项本地改动` : '打开本地项目或从 GitHub 克隆'}</small></span></span><button title="刷新 Git、PR 与 CI/CD 状态" onClick={props.onRefreshRepository}><RefreshCw size={13} /></button></div>
-          </section>
-        </aside>}
+      <section className="draft-recent-tasks" aria-label="最近任务"><h3>最近任务</h3>{props.recentRuns.length ? <div className="draft-recent-grid">{props.recentRuns.map((run) => <button className="draft-recent-card" key={run.id} onClick={() => props.onSelectRun(run.id)}>
+        <span className="draft-recent-title"><FileDiff size={17} /><b>{run.title}</b><ChevronRight size={15} /></span>
+        <span className="draft-recent-meta"><span className={`status-badge ${run.status}`}>{run.resolution === 'merged' ? '已交付' : statusLabel[run.status]}</span><time dateTime={run.updatedAt}>{formatDate(run.updatedAt)}</time></span>
+      </button>)}</div> : <p>当前项目还没有任务，从上方描述目标开始。</p>}</section>
+      <p className="draft-preservation-note">切换任务和页面会保留草稿；草稿按项目分别保存。</p>
+        </>}
       </div>
-      {selected && approvalOpen && !approvalMinimized && (selected.status === 'awaiting_approval' || selected.status === 'awaiting_review_approval') && <ApprovalPanel run={selected} busy={props.busy} onMinimize={() => setApprovalMinimized(true)} onCommand={props.onRunCommand} />}
+      {props.active === 'run' && selected && approvalOpen && !approvalMinimized && (selected.status === 'awaiting_approval' || selected.status === 'awaiting_review_approval') && <ApprovalPanel run={selected} busy={props.busy} onMinimize={() => setApprovalMinimized(true)} onCommand={props.onRunCommand} />}
     </div>
   )
 }
@@ -902,12 +979,12 @@ function DeliveryGuidePanel({ guide, busy, onStep, onRefresh, onClose }: {
   </section>
 }
 
-function RepositoryPublishGuide({ repository, githubDelivery, resolution, deliveryGuide, plan, busy, confirmation, onConfirmation, onPreview, onPreviewPublish, onExecute, onCancel, onOpenRemote, onOpenLocalGuide, onOpenRepository, onRefresh, onLocalStep, onAdvanceLocalDelivery, onAutoLocalDelivery }: {
+function RepositoryPublishGuide({ repository, githubDelivery, resolution, deliveryGuide, plan, busy, confirmation, onConfirmation, onPreview, onPreviewPublish, onExecute, onCancel, onOpenRemote, onOpenLocalGuide, onOpenRepository, onOpenResult, onRefresh, onLocalStep, onAdvanceLocalDelivery, onAutoLocalDelivery }: {
   repository: RepositoryInspection; githubDelivery: GitHubDeliveryStatus; resolution: 'open' | 'merged' | 'discarded'
   deliveryGuide: DeliveryGuide | null
   plan: GitOperationPlan | null; busy?: string; confirmation: string; onConfirmation: (value: string) => void
   onPreview: () => void; onPreviewPublish: (remoteUrl?: string) => void; onExecute: () => void; onCancel: () => void; onOpenRemote: (url: string) => void
-  onOpenLocalGuide: () => void; onOpenRepository: () => void; onRefresh: () => void; onLocalStep: (action: DeliveryGuideAction) => void
+  onOpenLocalGuide: () => void; onOpenRepository: () => void; onOpenResult: () => void; onRefresh: () => void; onLocalStep: (action: DeliveryGuideAction) => void
   onAdvanceLocalDelivery: () => void; onAutoLocalDelivery: () => void
 }) {
   const planAnchor = useRef<HTMLDivElement>(null)
@@ -928,10 +1005,10 @@ function RepositoryPublishGuide({ repository, githubDelivery, resolution, delive
     onRefresh()
   }
   return <section className="repository-publish-guide">
-    <div className="repository-publish-head"><span><Github size={15} /><span><small>SAFE DELIVERY · 1—2—3</small><b>安全交付</b></span></span><div><button className="repository-auto-advance" disabled={Boolean(busy)} onClick={autoAdvance}><Sparkles size={12} />自动推进</button>{repository.remoteWebUrl && <button title="打开 GitHub 仓库" onClick={() => onOpenRemote(repository.remoteWebUrl!)}><ExternalLink size={12} /></button>}</div></div>
-    <p className="repository-auto-note">自动完成本地步骤；远端写入前仍需确认。</p>
+    <div className="repository-publish-head"><span><Github size={15} /><span><small>SAFE DELIVERY · 1—2—3</small><b>安全交付</b></span></span><div>{!locallyMerged && resolution === 'open' && <button className="repository-auto-advance" disabled={Boolean(busy)} onClick={autoAdvance}><Sparkles size={12} />自动推进</button>}{repository.remoteWebUrl && <button title="打开 GitHub 仓库" onClick={() => onOpenRemote(repository.remoteWebUrl!)}><ExternalLink size={12} /></button>}</div></div>
+    <p className="repository-auto-note">{locallyMerged ? '本地交付已完成。推送 GitHub 是可选的下一步，需要预览并确认。' : resolution === 'discarded' ? '此任务已放弃，本地交付操作已结束。' : '自动完成本地步骤；远端写入前仍需确认。'}</p>
     <div className="repository-publish-steps">
-      <article className={locallyMerged ? 'done' : 'ready'}><i>{locallyMerged ? <Check size={12} /> : '1'}</i><span><b>本地合并</b><small>{locallyMerged ? `已进入 ${repository.branch || '当前分支'}` : nextLocalStep ? `下一步：${nextLocalStep.title}` : '检查 worktree'}</small></span><button className="repository-publish-action" disabled={Boolean(busy)} onClick={locallyMerged ? onOpenRepository : deliveryGuide ? onAdvanceLocalDelivery : onOpenLocalGuide}>{locallyMerged ? <FolderGit2 size={12} /> : <GitMerge size={12} />}{locallyMerged ? '查看结果' : nextLocalStep?.actionLabel ?? '检查状态'}<ChevronRight size={12} /></button>{deliveryGuide && !locallyMerged && <div className="repository-local-substeps">{deliveryGuide.steps.map((step, index) => <button className={step.status} disabled={Boolean(busy) || step.status !== 'ready'} onClick={() => step.status === 'ready' && onLocalStep(step.key)} key={step.key}><i>{step.status === 'done' ? <Check size={10} /> : index + 1}</i><span><b>{step.title}</b><small>{step.status === 'ready' ? step.actionLabel : step.status === 'done' ? '已完成' : '等待前一步'}</small></span>{step.status === 'ready' && <ChevronRight size={11} />}</button>)}</div>}</article>
+      <article className={locallyMerged ? 'done' : 'ready'}><i>{locallyMerged ? <Check size={12} /> : '1'}</i><span><b>本地合并</b><small>{locallyMerged ? '已合并至源项目' : nextLocalStep ? `下一步：${nextLocalStep.title}` : '检查 worktree'}</small></span><button className="repository-publish-action" disabled={Boolean(busy)} onClick={locallyMerged ? onOpenResult : deliveryGuide ? onAdvanceLocalDelivery : onOpenLocalGuide}>{locallyMerged ? <FolderGit2 size={12} /> : <GitMerge size={12} />}{locallyMerged ? '查看结果' : nextLocalStep?.actionLabel ?? '检查状态'}<ChevronRight size={12} /></button>{deliveryGuide && !locallyMerged && <div className="repository-local-substeps">{deliveryGuide.steps.map((step, index) => <button className={step.status} disabled={Boolean(busy) || step.status !== 'ready'} onClick={() => step.status === 'ready' && onLocalStep(step.key)} key={step.key}><i>{step.status === 'done' ? <Check size={10} /> : index + 1}</i><span><b>{step.title}</b><small>{step.status === 'ready' ? step.actionLabel : step.status === 'done' ? '已完成' : '等待前一步'}</small></span>{step.status === 'ready' && <ChevronRight size={11} />}</button>)}</div>}</article>
       <article className={pushed ? 'done' : locallyMerged ? 'ready' : 'pending'}><i>{pushed ? <Check size={12} /> : '2'}</i><span><b>推送 GitHub</b><small>{!githubConnected ? '绑定远端后首次发布' : !hasUpstream ? '建立上游分支' : pushed ? '已同步' : locallyMerged ? `${repository.ahead} 个 commit 待推送` : '等待本地合并'}</small></span><button className="repository-publish-action" disabled={Boolean(busy)} onClick={!locallyMerged ? onOpenRepository : !githubConnected || !hasUpstream ? () => setPublishSetupOpen(!publishSetupOpen) : pushed ? onRefresh : plan ? () => planAnchor.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }) : onPreview}>{!githubConnected || !hasUpstream ? <GitBranch size={12} /> : pushed ? <RefreshCw size={12} /> : <ShieldCheck size={12} />}{!githubConnected ? '绑定并发布' : !hasUpstream ? '建立上游' : pushed ? '检查同步' : plan ? '继续确认' : '预览推送'}<ChevronDown size={12} /></button></article>
       <article className={prReady ? 'done' : pushed ? 'ready' : 'pending'}><i>{prReady ? <Check size={12} /> : '3'}</i><span><b>检查 PR / CI</b><small>{prReady ? `监控 PR #${githubDelivery.pullRequest!.number}` : pushed ? '刷新远端状态' : '推送后开始监控'}</small></span><button className="repository-publish-action" disabled={Boolean(busy) || !githubConnected} onClick={onRefresh}><RefreshCw size={12} />刷新监控<ChevronRight size={12} /></button>{prReady && <button className="repository-publish-link" onClick={() => onOpenRemote(githubDelivery.pullRequest!.url)}><GitPullRequest size={11} />打开 PR #{githubDelivery.pullRequest!.number}</button>}</article>
     </div>
@@ -983,21 +1060,24 @@ function RunResourceLedger({ run, onInspect }: { run?: RunSummary; onInspect?: (
 }
 
 function RepositoryControl(props: {
-  repository: RepositoryInspection; githubDelivery: GitHubDeliveryStatus; busy?: string
+  repository: RepositoryInspection; githubDelivery: GitHubDeliveryStatus; busy?: string; expanded?: boolean
   onChoose: () => void; onCloneGitHub: (url: string) => void; onRefreshRepository: () => void; onOpenRemote: (url: string) => void
 }) {
   const { repository, githubDelivery } = props
   const [githubUrl, setGithubUrl] = useState('')
+  const [showProjectDetails, setShowProjectDetails] = useState(Boolean(props.expanded))
+  useEffect(() => setShowProjectDetails(Boolean(props.expanded)), [repository.workspace, props.expanded])
   const [repositoryTab, setRepositoryTab] = useState<'project' | 'delivery'>('project')
   const pullRequest = githubDelivery.pullRequest
   return <section className="delivery-control">
-    <div className="delivery-control-head"><div><span className="repository-icon"><FolderGit2 size={18} /></span><span><small>项目与交付 · REPOSITORY & DELIVERY</small><b>{repository.connected || repository.bootstrapEligible ? repository.name : '连接项目'}</b><em>{repository.connected ? repository.root : repository.bootstrapEligible ? `${repository.root} · ${repository.message}` : repository.message}</em></span></div><div><span className="monitoring-badge"><i />只读监控 · 30s</span><button className="icon-refresh" title="刷新 Git、PR 与 CI/CD 状态" onClick={props.onRefreshRepository}><RefreshCw size={14} /></button></div></div>
-    <div className="repository-connect compact">
-      <button className="repository-source local" onClick={props.onChoose}><FolderOpen size={17} /><span><b>打开本地项目</b><small>已有 Git 仓库或全新空文件夹</small></span></button>
-      <div className="repository-source github"><Github size={17} /><span><b>从 GitHub 克隆</b><small>使用本机 Git 或 SSH 凭据</small></span><div><input aria-label="GitHub 仓库地址" placeholder="https://github.com/owner/repo" value={githubUrl} onChange={(event) => setGithubUrl(event.target.value)} /><button disabled={!githubUrl.trim() || props.busy === 'clone-github'} onClick={() => props.onCloneGitHub(githubUrl)}><CloudDownload size={13} />克隆</button></div></div>
+    <div className="delivery-control-head"><div><span className="repository-icon"><FolderGit2 size={18} /></span><span><small>项目与交付 · REPOSITORY & DELIVERY</small><b>{repository.connected || repository.bootstrapEligible ? repository.name : '连接项目'}</b><em>{repository.connected ? repository.root : repository.bootstrapEligible ? `${repository.root} · ${repository.message}` : repository.message}</em></span></div><div>{repository.connected && <><span className="connected-project-state"><GitBranch size={13} />{repository.branch} · {repository.conflicts ? `${repository.conflicts} 个冲突` : repository.clean ? '工作区干净' : `${repository.staged + repository.unstaged + repository.untracked} 项改动`}</span><button className="quiet-button" aria-expanded={showProjectDetails} onClick={() => setShowProjectDetails(!showProjectDetails)}>{showProjectDetails ? '收起项目详情' : '项目详情与切换'}</button></>}<button className="icon-refresh" title="刷新 Git、PR 与 CI/CD 状态" onClick={props.onRefreshRepository}><RefreshCw size={14} /></button></div></div>
+    {(!repository.connected || showProjectDetails) && <div className="repository-connect compact">
+      <button className="repository-source local" disabled={Boolean(props.busy)} onClick={props.onChoose}><FolderOpen size={17} /><span><b>打开本地项目</b><small>已有 Git 仓库或全新空文件夹</small></span></button>
+      <div className="repository-source github"><Github size={17} /><span><b>从 GitHub 克隆</b><small>使用本机 Git 或 SSH 凭据</small></span><div><input aria-label="GitHub 仓库地址" placeholder="https://github.com/owner/repo" value={githubUrl} onChange={(event) => setGithubUrl(event.target.value)} /><button disabled={!githubUrl.trim() || Boolean(props.busy)} onClick={() => props.onCloneGitHub(githubUrl)}><CloudDownload size={13} />克隆</button></div></div>
     </div>
+    }
     {repository.bootstrapEligible && <div className="repository-bootstrap"><span><Sparkles size={16} /></span><div><small>NEW PROJECT · 从零开始</small><b>{repository.bootstrapKind === 'empty-directory' ? '首个任务将安全初始化项目' : '首个任务将建立首个 Git 基线'}</b><p>Foreman 会创建 <code>main</code> 的空基线，再在独立 <code>foreman/…</code> worktree 中规划与写代码；不会自动导入任何已有文件。</p></div></div>}
-    {repository.connected && <>
+    {repository.connected && showProjectDetails && <>
       <div className="repository-tabs" role="tablist" aria-label="项目与交付详情"><button role="tab" aria-selected={repositoryTab === 'project'} className={repositoryTab === 'project' ? 'selected' : ''} onClick={() => setRepositoryTab('project')}><FolderGit2 size={13} />项目状态</button><button role="tab" aria-selected={repositoryTab === 'delivery'} className={repositoryTab === 'delivery' ? 'selected' : ''} onClick={() => setRepositoryTab('delivery')}><Workflow size={13} />PR 与 CI/CD</button></div>
       {repositoryTab === 'project' && <>
       <div className="delivery-overview">
@@ -1045,7 +1125,8 @@ function deliveryTone(status?: string, conclusion?: string): string {
   return 'neutral'
 }
 
-function WorkflowView({ settings, capabilities, agentEnvironment, onChange, onDesktop, notice, onRefreshEnvironment }: {
+function WorkflowView({ settings, capabilities, agentEnvironment, onChange, onDesktop, notice, onRefreshEnvironment, section }: {
+  section?: SettingsSection
   settings: AppSettings; capabilities: ExecutorCapability[]; agentEnvironment: AgentEnvironment; onChange: (settings: AppSettings) => void
   onDesktop: (kind: ExecutorKind) => void; notice: string; onRefreshEnvironment?: () => void
 }) {
@@ -1054,16 +1135,19 @@ function WorkflowView({ settings, capabilities, agentEnvironment, onChange, onDe
     catch { return null }
   })
   const [checkingModels, setCheckingModels] = useState(false)
+  const [modelScanError, setModelScanError] = useState('')
   const [customModelChecks, setCustomModelChecks] = useState<Record<string, { state: 'checking' | 'ready' | 'error'; message: string }>>({})
   const updateRole = (role: RoleKey, patch: Partial<RoleConfig>) => onChange({ ...settings, roles: { ...settings.roles, [role]: { ...settings.roles[role], ...patch } } })
   const selectableModels = (kind: ExecutorKind) => selectableModelCatalog(settings, capabilityScan, kind).filter((model) => kind !== 'custom' || customModelIsComplete(model))
   const scanRoleModels = async () => {
     setCheckingModels(true)
+    setModelScanError('')
     try {
       const scan = await window.foreman.scanModelCapabilities(buildModelCapabilityTargets(settings), settings.workspace)
       setCapabilityScan(scan)
       window.localStorage.setItem('foreman:model-capability-scan', JSON.stringify(scan))
     }
+    catch (error) { setModelScanError(`模型检测未完成：${error instanceof Error ? error.message : String(error)}。请检查运行环境后重试；下方仍保留上次结果。`) }
     finally { setCheckingModels(false) }
   }
   const updateLegacyCatalog = (kind: ExecutorKind, value: string) => {
@@ -1101,7 +1185,7 @@ function WorkflowView({ settings, capabilities, agentEnvironment, onChange, onDe
   }
   return (
     <>
-      <section className="custom-model-settings" id="custom-model-settings">
+      {(!section || section === 'custom-model-settings') && <section className="custom-model-settings" id="custom-model-settings">
         <div className="memory-settings-head"><Cpu size={18}/><div><b>自定义 API 模型</b><span>支持 OpenAI Responses 与 Anthropic Messages 兼容接口；API Key 仅作为执行器环境变量注入，不写入命令或任务日志。</span></div><div className="custom-model-heading-actions"><span className={`auto-save-status ${notice.includes('待完善') ? 'attention' : ''}`}>{notice || '修改后自动保存'}</span><button className="quiet-button custom-model-add" onClick={addCustomModel}><Plus size={14}/>添加模型</button></div></div>
         {settings.models.custom.length === 0 ? <div className="custom-model-empty"><Cpu size={19}/><span><b>尚未配置自定义模型</b><small>添加后可在下方规划者、执行者和审核者的“执行器”中选择“自定义 API”。</small></span></div> : <div className="custom-model-list">{settings.models.custom.map((model, index) => {
           const inUse = (Object.keys(settings.roles) as RoleKey[]).some((role) => settings.roles[role].executor === 'custom' && settings.roles[role].model === model.id)
@@ -1118,7 +1202,7 @@ function WorkflowView({ settings, capabilities, agentEnvironment, onChange, onDe
             {check && <div className={`custom-model-check-result ${check.state}`}><i /> <span>{check.message}</span></div>}
           </article>
         })}</div>}
-      </section>
+      </section>}
 
       {false && <><section className="agent-environment-card">
         <div className="memory-settings-head"><Monitor size={18} /><div><b>Desktop 与 Skill 环境</b><span>后台执行保持可自动化；需要人工判断时可复制完整接管上下文并打开对应 Desktop。</span></div><button className="icon-refresh" title="重新扫描" onClick={onRefreshEnvironment}><RefreshCw size={14} /></button></div>
@@ -1165,30 +1249,32 @@ function WorkflowView({ settings, capabilities, agentEnvironment, onChange, onDe
         </div>
       </section></>}
 
-      <section className="model-catalog-card">
-        <div className="memory-settings-head model-capability-head"><Cpu size={18} /><div><b>模型能力清单</b><span>一次验证 Codex 与 Claude Code 的完整候选目录，并检查 low 到 max 的五档推理强度。检测只更新状态，不会删除模型。</span></div><button className="primary model-scan-button" disabled={checkingModels} onClick={() => void scanRoleModels()}>{checkingModels ? <LoaderCircle className="spin" size={14} /> : <Activity size={14} />}{checkingModels ? '正在检测能力…' : '一键检测全部模型'}</button></div>
+      {(!section || section === 'settings-model-catalog') && <section className="model-catalog-card" id="settings-model-catalog">
+        <div className="memory-settings-head model-capability-head"><Cpu size={18} /><div><b>模型能力清单</b><span>模型检测会向远端发送请求，可能产生用量；检测结果保留时间戳，与当前安装、登录状态分别显示。</span></div><button className="primary model-scan-button" disabled={checkingModels} onClick={() => void scanRoleModels()}>{checkingModels ? <LoaderCircle className="spin" size={14} /> : <Activity size={14} />}{checkingModels ? '正在检测能力…' : '一键检测全部模型'}</button></div>
+        {modelScanError && <p className="form-hint error" role="alert">{modelScanError}</p>}
         <div className="model-capability-grid">{(Object.keys(roleMeta) as RoleKey[]).map((role) => {
           const config = settings.roles[role]
           const result = capabilityScan?.models.find((model) => model.kind === config.executor && model.model === config.model)
           const configured = settings.models[config.executor].find((model) => model.id === config.model)
           const efforts = result?.supportedEfforts ?? configured?.efforts ?? ['low', 'medium', 'high', 'xhigh', 'max']
-          const state = result?.availability ?? 'pending'
+          const readiness = modelReadiness(settings, capabilities, capabilityScan, config.executor, config.model)
+          const state = readiness.state
           return <article className={`model-capability-card ${state}`} key={role}>
-            <header><span>{roleMeta[role].index}</span><div><small>{roleMeta[role].eyebrow} · {roleMeta[role].label}</small><b>{config.model}</b></div><em>{state === 'available' ? '可用' : state === 'partial' ? '部分可用' : state === 'unavailable' ? '不可用' : '待检测'}</em></header>
-            <p title={result?.message}>{executorLabel(config.executor)} · {compactCapabilityMessage(result?.message)}</p>
-            <div><small>{result ? '已支持强度' : '默认候选强度'}</small><span>{efforts.length ? efforts.map((effort) => <i key={effort}>{effort}</i>) : <b>无可用强度</b>}</span></div>
+            <header><span>{roleMeta[role].index}</span><div><small>{roleMeta[role].eyebrow} · {roleMeta[role].label}</small><b>{config.model}</b></div><em>{readiness.label}</em></header>
+            <p>{executorLabel(config.executor)} · {readiness.detail}</p>
+            <div><small>{result ? '上次检测的强度' : '配置的候选强度'}</small><span>{efforts.length ? efforts.map((effort) => <i key={effort}>{effort}</i>) : <b>无可用强度</b>}</span></div>
           </article>
         })}</div>
-        {capabilityScan && <div className="model-scan-directory"><div className="model-scan-directory-head"><span><Cpu size={14} /><b>完整检测目录</b></span><small>包含默认候选、CLI 发现项与自定义 API 模型</small></div>{(['codex', 'claude', 'custom'] as ExecutorKind[]).map((kind) => <section key={kind}><header><b>{executorLabel(kind)}</b><small>{capabilityScan.models.filter((model) => model.kind === kind).length} 个模型</small></header><div>{capabilityScan.models.filter((model) => model.kind === kind).map((model) => <article className={model.availability} key={`${kind}-${model.model}`}><span><b>{model.model}</b><small title={model.message}>{compactCapabilityMessage(model.message)}</small></span><em>{model.availability === 'available' ? '可用' : model.availability === 'partial' ? '部分可用' : '不可用'}</em><div>{model.supportedEfforts.length ? model.supportedEfforts.map((effort) => <i key={effort}>{effort}</i>) : <i>无可用强度</i>}</div></article>)}</div></section>)}</div>}
-        <div className="model-scan-foot"><span>{capabilityScan ? `上次检测 ${new Date(capabilityScan.checkedAt).toLocaleString('zh-CN')}；可用模型优先显示，不可用与未检测模型仍会保留。` : '未检测时，下方模型与推理强度保持当前默认候选。'}</span></div>
-      </section>
+        {capabilityScan && <details className="model-scan-directory"><summary className="model-scan-directory-head"><span><Cpu size={14} /><b>完整检测目录</b></span><small>展开历史检测结果；认证状态以当前环境为准</small></summary>{(['codex', 'claude', 'custom'] as ExecutorKind[]).map((kind) => <section key={kind}><header><b>{executorLabel(kind)}</b><small>{capabilityScan.models.filter((model) => model.kind === kind).length} 个模型</small></header><div>{capabilityScan.models.filter((model) => model.kind === kind).map((model) => <article className="historical" key={`${kind}-${model.model}`}><span><b>{model.model}</b><small title={model.message}>{compactCapabilityMessage(model.message)}</small></span><em>{model.availability === 'available' ? '上次通过' : model.availability === 'partial' ? '上次部分通过' : '上次未通过'}</em><div>{model.supportedEfforts.length ? model.supportedEfforts.map((effort) => <i key={effort}>{effort}</i>) : <i>无可用强度</i>}</div></article>)}</div></section>)}</details>}
+        <div className="model-scan-foot"><span>{capabilityScan ? `上次检测 ${new Date(capabilityScan.checkedAt).toLocaleString('zh-CN')}；仅代表该时刻的结果，网络、配额或认证变化后需要重新检测。` : '未检测时，下方模型与推理强度保持当前默认候选。'}</span></div>
+      </section>}
 
-      <section className="model-catalog-card legacy-model-catalog" hidden>
+      {(!section || section === 'settings-model-catalog') && <details className="model-catalog-card legacy-model-catalog"><summary>手动编辑 CLI 候选模型</summary>
         <div className="memory-settings-head"><Cpu size={18} /><div><b>模型能力清单</b><span>执行器没有稳定模型列表接口时，以这里的配置作为候选；“检测”会用实际模型和推理强度调用远端 API 验证。</span></div></div>
         <div className="model-catalog-grid">{(['codex', 'claude'] as ExecutorKind[]).map((kind) => <label key={kind}><span><b>{kind === 'codex' ? 'Codex CLI' : 'Claude Code'}</b><small>每行：模型 ID | 显示名称 | 支持强度</small></span><textarea value={settings.models[kind].map((model) => `${model.id} | ${model.label} | ${model.efforts.join(',')}`).join('\n')} onChange={(event) => updateLegacyCatalog(kind, event.target.value)} /></label>)}</div>
-      </section>
+      </details>}
 
-      <section className="workflow-diagram settings-workflow-settings" id="role-workflow-settings">
+      {(!section || section === 'role-workflow-settings') && <section className="workflow-diagram settings-workflow-settings" id="role-workflow-settings">
         <div className="memory-settings-head settings-workflow-head"><Workflow size={18}/><div><b>角色与流程</b><span>按规划、执行、审核的协作顺序配置模型、推理强度与专用 Skill。</span></div></div>
         <div className="workflow-heading"><div><span className="eyebrow">ORCHESTRATION GRAPH</span><h2>模型协作链路</h2></div><span className="workflow-legend"><i />只读决策 <i />隔离写入 <i />证据审核</span></div>
         <div className="workflow-policy-strip"><div><RotateCcw size={15} /><span><b>Reviewer 返工循环</b><small>审核要求修改时重新进入执行；达到上限后停止并交给人工决策。</small></span></div><label><span>最大返工轮次</span><input type="number" min="0" max="8" value={settings.maxReviewLoops} onChange={(event) => onChange({ ...settings, maxReviewLoops: Number(event.target.value) })} /></label></div>
@@ -1198,16 +1284,17 @@ function WorkflowView({ settings, capabilities, agentEnvironment, onChange, onDe
           const availableModels = selectableModels(config.executor)
           const modelDefinition = availableModels.find((model) => model.id === config.model)
           const scannedModel = capabilityScan?.models.find((model) => model.kind === config.executor && model.model === config.model)
-          const availableEfforts = scannedModel ? scannedModel.supportedEfforts : modelDefinition?.efforts ?? ['low', 'medium', 'high', 'xhigh', 'max']
+          const availableEfforts = scannedModel?.supportedEfforts.length ? scannedModel.supportedEfforts : modelDefinition?.efforts ?? ['low', 'medium', 'high', 'xhigh', 'max']
+          const readiness = modelReadiness(settings, capabilities, capabilityScan, config.executor, config.model)
           const providerSkills = uniqueInvocations(agentEnvironment.skills.filter((skill) => skill.provider === config.executor && skill.enabled))
           return <Fragment key={role}><div className="role-card-wrap">
             <article className={`role-card role-${role}`}>
-              <div className="role-card-head"><span className="role-number">{meta.index}</span><div><small>{meta.eyebrow}</small><div className="role-title-line"><h2>{meta.label}</h2><span className={`role-model-status ${scannedModel?.availability ?? 'pending'}`}><i /><span>{!scannedModel ? '待检测' : scannedModel.availability === 'available' ? '可用' : scannedModel.availability === 'partial' ? '部分可用' : '不可用'}</span></span></div></div><Bot size={21} /></div>
+              <div className="role-card-head"><span className="role-number">{meta.index}</span><div><small>{meta.eyebrow}</small><div className="role-title-line"><h2>{meta.label}</h2><span className={`role-model-status ${readiness.state}`} title={readiness.detail}><i /><span>{readiness.label}</span></span></div></div><Bot size={21} /></div>
               <label><span>执行器</span><select value={config.executor} onChange={(event) => { const executor = event.target.value as ExecutorKind; const first = selectableModels(executor)[0]; updateRole(role, { executor, model: first?.id || '', effort: first?.efforts[0] ?? 'medium', skills: [] }) }}>
                 <option value="codex">Codex CLI</option><option value="claude">Claude Code</option><option value="custom" disabled={selectableModels('custom').length === 0}>自定义 API{selectableModels('custom').length === 0 ? '（先完成模型配置）' : ''}</option>
               </select></label>
               <label><span>模型</span><select value={config.model} onChange={(event) => { const model = event.target.value; const definition = availableModels.find((item) => item.id === model); updateRole(role, { model, ...(definition && !definition.efforts.includes(config.effort) ? { effort: definition.efforts[0] } : {}) }) }}>
-                {!availableModels.some((model) => model.id === config.model) && <option value={config.model}>{config.model} · 当前配置</option>}{availableModels.map((model) => { const result = capabilityScan?.models.find((item) => item.kind === config.executor && item.model === model.id); return <option key={model.id} value={model.id}>{model.label}{result ? ` · ${result.availability === 'available' ? '可用' : result.availability === 'partial' ? '部分可用' : '不可用'}` : capabilityScan ? ' · 未检测' : ''}</option> })}
+                {!availableModels.some((model) => model.id === config.model) && <option value={config.model}>{config.model} · 当前配置</option>}{availableModels.map((model) => { const result = capabilityScan?.models.find((item) => item.kind === config.executor && item.model === model.id); return <option key={model.id} value={model.id}>{model.label}{result ? ` · ${result.availability === 'available' ? '上次检测通过' : result.availability === 'partial' ? '上次部分通过' : '上次检测失败'}` : capabilityScan ? ' · 未检测' : ''}</option> })}
               </select></label>
               <label><span>推理强度</span><select value={config.effort} disabled={Boolean(capabilityScan && !availableEfforts.length)} onChange={(event) => updateRole(role, { effort: event.target.value as Effort })}>
                 {!availableEfforts.length && <option value={config.effort}>无可用强度</option>}{availableEfforts.map((effort) => <option key={effort}>{effort}</option>)}
@@ -1220,7 +1307,7 @@ function WorkflowView({ settings, capabilities, agentEnvironment, onChange, onDe
                   {providerSkills.map((skill) => <label className={config.skills.includes(skill.invocation) ? 'selected' : ''} key={skill.invocation} title={`${skill.path}\n${skill.description}`}><input type="checkbox" checked={config.skills.includes(skill.invocation)} onChange={() => toggleSkill(role, skill.invocation)} /><span><b>{skill.invocation}</b><small>{scopeLabel(skill.scope)}</small></span><i><Check size={10} /></i></label>)}
                 </div></div>}
               </div>
-              <label><span>角色提示词</span><textarea value={config.prompt} onChange={(event) => updateRole(role, { prompt: event.target.value })} /></label>
+              <details className="role-prompt-editor"><summary>编辑角色提示词</summary><label><span>角色提示词</span><textarea value={config.prompt} onChange={(event) => updateRole(role, { prompt: event.target.value })} /></label></details>
               {(() => {
                 const capability = capabilities.find((item) => item.kind === config.executor)
                 const connected = Boolean(capability?.installed && capability.authenticated)
@@ -1234,34 +1321,45 @@ function WorkflowView({ settings, capabilities, agentEnvironment, onChange, onDe
         <ParallelSettings settings={settings} onChange={onChange} />
         <div className="verification-rail"><span><ShieldCheck size={14} /></span><div><b>Foreman 独立门禁</b><small>执行完成后，在 Reviewer 介入前运行本地 lint、typecheck、test 与 build。</small></div></div>
         <div className="policy-note"><Cpu size={18} /><div><b>权限策略</b><span>规划者与审核者以只读模式运行；只有执行者能修改工作目录。所有输出都会保存在本机 SQLite 数据库。</span></div></div>
-      </section>
+      </section>}
     </>
   )
 }
 
-function AppSettingsView({ settings, capabilities, agentEnvironment, onChange, onRefreshEnvironment, onDesktop, onProbeMemory, onSetupTencentDb, tencentDbSetupResult, memoryHealth, notice, busy }: {
+export function AppSettingsView({ section = 'settings-environment', onSectionChange, settings, capabilities, agentEnvironment, onChange, onRefreshEnvironment, onDesktop, onProbeMemory, onSetupTencentDb, tencentDbSetupResult, memoryHealth, notice, busy }: {
+  section?: SettingsSection; onSectionChange?: (section: SettingsSection) => void
   settings: AppSettings; capabilities: ExecutorCapability[]; agentEnvironment: AgentEnvironment; onChange: (settings: AppSettings) => void
   onRefreshEnvironment: () => void; onDesktop: (kind: ExecutorKind) => void; onProbeMemory: () => void; onSetupTencentDb: () => void
   tencentDbSetupResult?: TencentDbSetupResult; memoryHealth?: MemoryProviderHealth; notice: string; busy?: string
 }) {
+  const contentRef = useRef<HTMLDivElement>(null)
+  useEffect(() => { if (contentRef.current) contentRef.current.scrollTop = 0 }, [section])
+  const group = settingsGroups.find((group) => group.id === section)!
   return <div className="page app-settings-page">
-    <section className="agent-environment-card">
+    <div className="page-command-bar"><div><span className="page-command-icon"><Settings2 size={17} /></span><span><b>设置</b><small>按环境、模型、流程与治理分别管理</small></span></div></div>
+    <div className="settings-layout"><nav className="settings-group-nav" aria-label="设置分组">{settingsGroups.map((item) => <button key={item.id} aria-current={section === item.id ? 'page' : undefined} onClick={() => onSectionChange?.(item.id)}><b>{item.label}</b><small>{item.description}</small></button>)}</nav>
+    <div className="settings-content" ref={contentRef} role="region" aria-label={group.label}>
+      <div className="settings-content-heading"><span><h1>{group.label}</h1><p>{group.description}</p></span><span className="auto-save-status" role="status">{notice || '修改后自动保存'}</span></div>
+    {section === 'settings-environment' && <section className="agent-environment-card" id="settings-environment">
       <div className="memory-settings-head"><Monitor size={18} /><div><b>执行器、Desktop 与 Skill 环境</b><span>CLI 负责自动执行；需要人工判断时可携带完整上下文切换到对应 Desktop。</span></div><div className="settings-card-actions"><button className="icon-refresh" title="重新扫描" onClick={onRefreshEnvironment}><RefreshCw size={14} /></button></div></div>
       <div className="desktop-grid">
         {capabilities.filter((capability) => capability.kind !== 'custom').map((capability) => {
           const desktop = agentEnvironment.desktops.find((item) => item.kind === capability.kind)
           const skillCount = agentEnvironment.skills.filter((skill) => skill.provider === capability.kind && skill.enabled).length
           return <article className={capability.installed && capability.authenticated ? 'desktop-card installed' : 'desktop-card'} key={capability.kind}>
-            <div className="desktop-icon"><Monitor size={18} /></div><div><b>{capability.kind === 'codex' ? 'Codex' : 'Claude Code'}</b><span>CLI {capability.installed ? `已连接 · ${capability.version}` : '未检测到'} · Desktop {desktop?.installed ? '可用' : '未安装'}</span><small>{skillCount} 个可发现 Skill{desktop?.appPath ? ` · ${desktop.appPath}` : ''}</small></div>
+            <div className="desktop-icon"><Monitor size={18} /></div><div><b>{capability.kind === 'codex' ? 'Codex' : 'Claude Code'}</b><span>CLI {executorReadiness(capability.kind, capabilities).label}{capability.installed ? ` · ${capability.version}` : ''} · Desktop {desktop?.installed ? '可用' : '未安装'}</span><small>{skillCount} 个可发现 Skill{desktop?.appPath ? ` · ${desktop.appPath}` : ''}</small></div>
             <button className="quiet-button" disabled={!desktop?.installed} onClick={() => onDesktop(capability.kind)}>打开 Desktop</button>
           </article>
         })}
       </div>
-      <div className="runtime-auth-detail">{capabilities.filter((capability) => capability.kind !== 'custom').map((capability) => <span className={capability.installed && capability.authenticated ? 'ready' : 'offline'} key={capability.kind}><i />{capability.kind === 'codex' ? 'Codex' : 'Claude'} CLI：{capability.authenticationMessage || (capability.installed ? '无法确认登录状态' : '未安装')}</span>)}</div>
+      <div className="runtime-auth-detail">{capabilities.filter((capability) => capability.kind !== 'custom').map((capability) => {
+        const readiness = executorReadiness(capability.kind, capabilities)
+        return <div className={readiness.state === 'available' ? 'ready' : 'offline'} key={capability.kind}><b>{executorLabel(capability.kind)}：{readiness.label}</b><p>{readiness.detail}</p><details><summary>认证诊断详情</summary><pre>{capability.authenticationMessage || '暂无诊断输出'}</pre></details></div>
+      })}</div>
       <div className="skill-scope-note"><Puzzle size={14} /><span><b>原生 Skill 发现</b> Codex 扫描仓库 `.agents/skills`、用户与 Plugin；Claude 扫描 `.claude/skills`、兼容 commands 与 Plugin。角色专用 Skill 请在“角色与流程”的对应角色卡中选择。</span></div>
-    </section>
-    <WorkflowView settings={settings} capabilities={capabilities} agentEnvironment={agentEnvironment} onChange={onChange} onDesktop={onDesktop} notice={notice} onRefreshEnvironment={onRefreshEnvironment} />
-    <section className="verification-settings">
+    </section>}
+    <WorkflowView settings={settings} capabilities={capabilities} agentEnvironment={agentEnvironment} onChange={onChange} onDesktop={onDesktop} notice={notice} onRefreshEnvironment={onRefreshEnvironment} section={section} />
+    {section === 'settings-verification' && <section className="verification-settings" id="settings-verification">
       <div className="memory-settings-head"><ShieldCheck size={18} /><div><b>独立验证门禁默认值</b><span>留空命令时自动发现 package.json 中的 lint、typecheck、test、build。</span></div></div>
       <div className="settings-section-body verification-body">
         <div className="settings-switch-stack">
@@ -1270,12 +1368,13 @@ function AppSettingsView({ settings, capabilities, agentEnvironment, onChange, o
         </div>
         <div className="verification-fields"><label><span>单命令超时（秒）</span><input type="number" min="10" max="3600" value={settings.verification.timeoutSeconds} onChange={(event) => onChange({ ...settings, verification: { ...settings.verification, timeoutSeconds: Number(event.target.value) } })} /></label><label><span>固定命令（每行一条；留空自动发现）</span><textarea value={settings.verification.commands.join('\n')} onChange={(event) => onChange({ ...settings, verification: { ...settings.verification, commands: lines(event.target.value) } })} /></label></div>
       </div>
-    </section>
-    <section className="verification-settings approval-settings">
+    </section>}
+    {section === 'settings-approvals' && <section className="verification-settings approval-settings" id="settings-approvals">
       <div className="memory-settings-head"><ShieldCheck size={18} /><div><b>人工批准与“替我批准”</b><span>低于置信度阈值时始终停下来请求人工确认；开关关闭时每次都由你批准。</span></div></div>
       <div className="approval-policy-grid">{(['planner', 'reviewer'] as const).map((key) => <article key={key}><label className="toggle-row"><span><b>{key === 'planner' ? '规划替我批准' : '审核替我批准'}</b><small>{key === 'planner' ? '保存合同并直接进入执行' : '确认审核结论并进入交付或返工'}</small></span><input type="checkbox" checked={settings.approvals[key].autoApprove} onChange={(event) => onChange({ ...settings, approvals: { ...settings.approvals, [key]: { ...settings.approvals[key], autoApprove: event.target.checked } } })} /><i aria-hidden="true" /></label><label className="confidence-field"><span>最低置信度</span><input type="range" min="0.5" max="1" step="0.05" value={settings.approvals[key].minConfidence} onChange={(event) => onChange({ ...settings, approvals: { ...settings.approvals, [key]: { ...settings.approvals[key], minConfidence: Number(event.target.value) } } })} /><b>{Math.round(settings.approvals[key].minConfidence * 100)}%</b></label></article>)}</div>
-    </section>
-    <MemoryConfiguration settings={settings} health={memoryHealth} setupResult={tencentDbSetupResult} busy={busy} onChange={onChange} onProbe={onProbeMemory} onSetup={onSetupTencentDb} />
+    </section>}
+    {section === 'settings-memory' && <MemoryConfiguration settings={settings} health={memoryHealth} setupResult={tencentDbSetupResult} busy={busy} onChange={onChange} onProbe={onProbeMemory} onSetup={onSetupTencentDb} />}
+    </div></div>
   </div>
 }
 
@@ -1320,13 +1419,15 @@ function VerificationPanel({ report }: { report: import('../../shared/contracts'
 
 function lines(value: string): string[] { return value.split('\n').map((line) => line.trim()).filter(Boolean) }
 
-function MemoryView({ entries, runs, activeWorkspace, stats, health, busy, onRefresh, onDecide, onForget }: {
+function MemoryView({ entries, runs, activeWorkspace, stats, health, busy, onRefresh, onDecide, onCurate, onForget }: {
   entries: MemoryEntry[]; runs: RunSummary[]; activeWorkspace: string; stats: MemoryStats; health?: MemoryProviderHealth; busy?: string
-  onRefresh: () => void; onDecide: (id: string, decision: 'approve' | 'reject') => void; onForget: (id: string) => void
+  onRefresh: () => void; onDecide: (id: string, decision: 'approve' | 'reject') => Promise<boolean>; onCurate: (input: import('../../shared/contracts').MemoryCurationInput) => Promise<boolean>; onForget: (id: string) => void
 }) {
+  const [curating, setCurating] = useState<MemoryEntry[] | null>(null)
+  const [preview, setPreview] = useState<MemoryEntry | null>(null)
   const [projectFilter, setProjectFilter] = useState(activeWorkspace || 'all')
   const [taskFilter, setTaskFilter] = useState('all')
-  const [statusFilter, setStatusFilter] = useState('all')
+  const [statusFilter, setStatusFilter] = useState('candidate')
   useEffect(() => { setProjectFilter(activeWorkspace || 'all'); setTaskFilter('all') }, [activeWorkspace])
   const runIndex = useMemo(() => new Map(runs.map((run) => [run.id, run])), [runs])
   const projectOptions = useMemo(() => [...new Set([activeWorkspace, ...entries.map((entry) => entry.workspace)].filter(Boolean))], [activeWorkspace, entries])
@@ -1349,26 +1450,29 @@ function MemoryView({ entries, runs, activeWorkspace, stats, health, busy, onRef
   return <div className="page memory-page">
     <div className="memory-metrics"><div><b>{stats.candidate}</b><span>等待审核</span></div><div><b>{stats.approved}</b><span>已批准</span></div><div><b>{stats.stale}</b><span>已失效</span></div><div className={health?.ok ? 'healthy' : 'unhealthy'}><ShieldCheck size={17} /><span>{health?.message ?? '检测中…'}</span></div></div>
     <section className="memory-organizer" aria-label="按任务整理记忆">
-      <div className="memory-organizer-title"><FolderGit2 size={16} /><span><b>任务归档</b><small>每条记忆保留来源任务与交付证据</small></span><button className="icon-refresh" title="刷新记忆" aria-label="刷新记忆" onClick={onRefresh}><RefreshCw size={14} /></button></div>
+      <div className="memory-organizer-title"><FolderGit2 size={16} /><span><b>任务归档</b><small>先提炼可复用经验，再逐条预览批准；一次性验收要求留在任务记录中</small></span><button className="icon-refresh" title="刷新记忆" aria-label="刷新记忆" onClick={onRefresh}><RefreshCw size={14} /></button></div>
       <label className="memory-project-filter"><span>项目</span><select value={projectFilter} onChange={(event) => { setProjectFilter(event.target.value); setTaskFilter('all') }}><option value="all">全部项目（{projectOptions.length}）</option>{projectOptions.map((workspace) => <option value={workspace} key={workspace}>{workspaceName(workspace)}</option>)}</select></label>
       <label className="memory-task-filter"><span>来源任务</span><select value={taskFilter} onChange={(event) => setTaskFilter(event.target.value)}><option value="all">全部任务（{sourceTasks.length}）</option>{sourceTasks.map((source) => <option value={source} key={source}>{source === 'manual' ? '手动与外部记忆' : runIndex.get(source)?.title ?? `来源任务已删除 · ${source.slice(0, 8)}`}</option>)}</select></label>
       <label className="memory-status-filter"><span>治理状态</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">全部状态</option><option value="candidate">等待审核</option><option value="approved">已批准</option><option value="stale">已失效</option><option value="rejected">已拒绝</option></select></label>
     </section>
-    <div className="memory-project-groups">{entries.length === 0 ? <div className="memory-empty"><Brain size={28} /><b>还没有长期记忆</b><span>任务合并成功后会在这里生成候选。</span></div> : projectGroups.length === 0 ? <div className="memory-empty"><Brain size={28} /><b>没有符合筛选条件的记忆</b><span>更换项目、来源任务或治理状态后重试。</span></div> : projectGroups.map(([workspace, projectMemories]) => {
+    <div className="memory-project-groups">{entries.length === 0 ? <div className="memory-empty"><Brain size={28} /><b>还没有长期记忆</b><span>任务合并后，只从评审中提炼经验；没有可复用发现时不生成候选。</span></div> : projectGroups.length === 0 ? <div className="memory-empty"><Brain size={28} /><b>没有符合筛选条件的记忆</b><span>更换项目、来源任务或治理状态后重试。</span></div> : projectGroups.map(([workspace, projectMemories]) => {
       const taskGroups = [...projectMemories.reduce((groups, entry) => { const source = entry.sourceRunId ?? 'manual'; groups.set(source, [...(groups.get(source) ?? []), entry]); return groups }, new Map<string, MemoryEntry[]>())]
       return <section className="memory-project-group" key={workspace}><header><FolderGit2 size={16} /><span><b>{workspaceName(workspace)}</b><small title={workspace}>{workspace}</small></span><em>{projectMemories.length} 条记忆</em></header><div className="memory-task-groups">{taskGroups.map(([source, groupEntries]) => {
         const sourceRun = source === 'manual' ? undefined : runIndex.get(source)
         return <details className="memory-task-group" key={source} open>
         <summary><span><ChevronDown size={15} /><span><b>{source === 'manual' ? '手动与外部记忆' : sourceRun?.title ?? '来源任务已删除'}</b><small>{source === 'manual' ? '无本地任务绑定' : sourceRun ? `${statusLabel[sourceRun.status]} · ${formatDate(sourceRun.updatedAt)}` : `任务 ID ${source.slice(0, 12)}`}</small></span></span><em>{groupEntries.length} 条记忆</em></summary>
-        <div className="memory-list">{groupEntries.map((entry) => <article className="memory-card" key={entry.id}>
+        {groupEntries.some((entry) => entry.status === 'candidate') && <div className="memory-curation-bar"><span>{groupEntries.filter((entry) => entry.status === 'candidate').length} 条待审候选 · 同类内容可以合并，原记录仍保留。</span><button className="quiet-button" disabled={Boolean(busy)} onClick={() => setCurating(groupEntries.filter((entry) => entry.status === 'candidate'))}>整理候选</button></div>}
+        <details className="memory-entry-details" open={groupEntries.length <= 3}><summary>查看完整内容与逐条操作（{groupEntries.length} 条）</summary><div className="memory-list">{groupEntries.map((entry) => <article className="memory-card" key={entry.id}>
           <div className="memory-card-head"><div><span className={`memory-status ${entry.status}`}>{memoryStatusLabel(entry.status)}</span><small>{memoryKindLabel(entry.kind)}</small></div><time>{new Date(entry.updatedAt).toLocaleString('zh-CN')}</time></div>
           <h2>{entry.title}</h2><p>{entry.content}</p>
           <div className="memory-source"><span>commit {entry.sourceCommit?.slice(0, 10) ?? 'manual'}</span><span title={entry.sourceFiles.join('\n')}>{entry.sourceFiles.length ? `${entry.sourceFiles.slice(0, 2).join(', ')}${entry.sourceFiles.length > 2 ? ` +${entry.sourceFiles.length - 2}` : ''}` : '无文件绑定'}</span><span>置信度 {Math.round(entry.confidence * 100)}%</span><span>召回 {entry.usageCount} 次</span></div>
-          <div className="memory-actions">{entry.status === 'candidate' && <><button className="memory-approve-button" disabled={Boolean(busy)} onClick={() => onDecide(entry.id, 'approve')}><Check size={13} />批准</button><button className="memory-reject-button" disabled={Boolean(busy)} onClick={() => onDecide(entry.id, 'reject')}><X size={13} />拒绝</button></>}<button className="danger-button memory-delete-button" disabled={Boolean(busy)} onClick={() => onForget(entry.id)}><Trash2 size={13} />删除</button></div>
-        </article>)}</div>
+          <div className="memory-actions">{entry.status === 'candidate' && <><button className="memory-approve-button" disabled={Boolean(busy)} onClick={() => needsMemoryCuration(entry) ? setCurating([entry]) : setPreview(entry)}><Check size={13} />{needsMemoryCuration(entry) ? '整理后批准' : '预览并批准'}</button><button className="memory-reject-button" disabled={Boolean(busy)} onClick={() => onDecide(entry.id, 'reject')}><X size={13} />拒绝</button></>}<button className="danger-button memory-delete-button" disabled={Boolean(busy)} onClick={() => onForget(entry.id)}><Trash2 size={13} />删除</button></div>
+        </article>)}</div></details>
       </details>
       })}</div></section>
     })}</div>
+    {curating && <MemoryCurationDialog entries={curating} busy={busy} onClose={() => setCurating(null)} onSave={onCurate} />}
+    {preview && <MemoryApprovalDialog entry={preview} busy={busy} onClose={() => setPreview(null)} onApprove={() => onDecide(preview.id, 'approve')} />}
   </div>
 }
 
@@ -1377,8 +1481,8 @@ function MemoryConfiguration({ settings, health, setupResult, busy, onChange, on
   onChange: (settings: AppSettings) => void; onProbe: () => void; onSetup: () => void
 }) {
   const [guideOpen, setGuideOpen] = useState(true)
-  return <section className="memory-settings governance-settings">
-    <div className="memory-settings-head"><Brain size={18} /><div><b>长期记忆设置</b><span>只从已合并且审核通过的任务生成候选；密钥只通过环境变量读取。</span></div></div>
+  return <section className="memory-settings governance-settings" id="settings-memory">
+    <div className="memory-settings-head"><Brain size={18} /><div><b>长期记忆设置</b><span>只从已合并任务的评审发现提炼经验，不再拆分一次性验收条件；密钥只通过环境变量读取。</span></div></div>
     <div className="settings-section-body memory-body">
       <div className="settings-switch-stack memory-switches">
         <label className="toggle-row"><span><b>启用长期记忆</b><small>任务开始前召回已批准知识</small></span><input type="checkbox" checked={settings.memory.enabled} onChange={(event) => onChange({ ...settings, memory: { ...settings.memory, enabled: event.target.checked } })} /><i aria-hidden="true" /></label>
@@ -1439,21 +1543,6 @@ function DiffLine({ line }: { line: string }) {
     : line.startsWith('-') && !line.startsWith('---') ? 'removed'
     : line.startsWith('@@') ? 'hunk' : line.startsWith('diff ') ? 'file' : ''
   return <span className={kind}>{line || ' '}{'\n'}</span>
-}
-
-function pipelineStages(status?: RunStatus, checkpoint?: RunStatus) {
-  const order: RunStatus[] = ['planning', 'implementing', 'reviewing', 'completed']
-  const effective = status === 'paused' ? checkpoint : status
-  const current = effective === 'awaiting_approval' ? 0 : effective === 'verifying' || effective === 'awaiting_review_approval' ? 2 : effective ? order.indexOf(effective) : -1
-  return [
-    { index: '01', label: '规划', detail: effective === 'awaiting_approval' ? '等待合同批准' : '分析与拆解', icon: <Sparkles size={18} /> },
-    { index: '02', label: '执行', detail: '修改与测试', icon: <TerminalSquare size={18} /> },
-    { index: '03', label: '审核', detail: 'Diff 与验证', icon: <Activity size={18} /> },
-    { index: '04', label: '交付', detail: '通过或返工', icon: <Check size={18} /> }
-  ].map((stage, index) => ({
-    ...stage,
-    state: current > index || status === 'completed' ? 'done' : current === index ? 'active' : 'idle'
-  }))
 }
 
 function compactCapabilityMessage(message?: string): string {
