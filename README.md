@@ -62,7 +62,9 @@ Model Foreman 将规划者、执行者、审核者和本地工程验证串在一
 
 ## 安装与快速开始
 
-仓库当前源码版本为 **1.0.0**，公开安装包以 [Releases](https://github.com/zhoujiacheng1031/Model-Foreman/releases) 中实际提供的版本和平台为准。本次已验证 macOS Apple Silicon 本地测试包，使用临时签名、尚未公证；Windows 1.0.0 安装包尚未验证。
+[1.0.0 Release](https://github.com/zhoujiacheng1031/Model-Foreman/releases/tag/v1.0.0) 提供 macOS Apple Silicon（DMG）和 Windows x64（EXE）安装包，以及 SHA-256 校验文件。双平台 CI 构建与包内版本检查已通过；Windows 安装和界面尚未进行人工验收。
+
+macOS 安装包使用临时签名、尚未公证；首次打开可能需要在“系统设置 → 隐私与安全性”中选择“仍要打开”。Windows 安装程序未配置商业代码签名证书，SmartScreen 可能显示来源提示。
 
 1. 安装对应平台的已发布安装包，或按下方说明从源码运行。
 2. 安装并登录所用的 Codex CLI 或 Claude Code CLI，在“设置 → 运行环境”检查状态。
