@@ -23,7 +23,8 @@ describe('0.4.2 product feedback regressions', () => {
     expect(source).toContain('onDelete: (run: RunSummary) => void')
     expect(source).toContain('className="run-history-actions"')
     expect(source).toContain('删除任务')
-    expect(source).toContain('重试任务')
+    expect(source).toContain('重新创建任务')
+    expect(source).toContain('从失败处继续')
   })
 
   it('uses compact model diagnostics and equal-height orchestration cards', async () => {

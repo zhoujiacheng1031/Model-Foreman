@@ -1,7 +1,5 @@
 export const settingsGroups = [
-  { id: 'settings-environment', label: '运行环境', description: '执行器登录、Desktop 与 Skill 发现' },
-  { id: 'custom-model-settings', label: 'API 模型', description: '添加接口、配置模型并验证连接' },
-  { id: 'settings-model-catalog', label: '模型检测', description: '检测可用模型与推理强度' },
+  { id: 'settings-connectors', label: '连接器', description: 'CLI、Desktop、API 与模型连接' },
   { id: 'role-workflow-settings', label: '角色与流程', description: '规划、执行、审核与并行策略' },
   { id: 'settings-verification', label: '验证门禁', description: '验证命令、超时与失败处理' },
   { id: 'settings-approvals', label: '人工批准', description: '规划与审核的批准策略' },

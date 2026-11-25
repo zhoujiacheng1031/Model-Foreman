@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import type { AppSettings, ExecutionContract, ExecutorKind, GoalDetail, GoalEvidence, GoalInput, GoalStatus, GoalSummary, GoalTask, GoalTaskStatus, ImplementationReport, MemoryEntry, MemoryKind, MemoryStatus, ReviewDecision, RunEvent, RunStageMetric, RunSummary, RunStatus, TaskInput, VerificationReport } from '../../shared/contracts'
+import { zcodeDefaultModel } from '../../shared/executors'
 
 export const defaultSettings = (workspace: string): AppSettings => ({
   workspace,
@@ -26,6 +27,7 @@ export const defaultSettings = (workspace: string): AppSettings => ({
       { id: 'opus', label: 'Claude Opus（别名）', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], source: 'builtin' },
       { id: 'glm-5.2', label: 'GLM-5.2（Claude Code 兼容）', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], source: 'builtin' }
     ],
+    zcode: [structuredClone(zcodeDefaultModel)],
     custom: []
   },
   roles: {
@@ -112,6 +114,7 @@ export class ForemanDatabase {
     this.ensureColumn('agent_tasks', "TEXT NOT NULL DEFAULT '[]'")
     this.ensureColumn('execution_policy', 'TEXT')
     this.ensureColumn('delivery_evidence', 'TEXT')
+    this.ensureColumn('failure', 'TEXT')
     this.ensureGoalColumn('token_budget', 'INTEGER')
     this.ensureGoalColumn('cost_budget_usd', 'REAL')
     this.ensureGoalTaskColumn('run_history', "TEXT NOT NULL DEFAULT '[]'")
@@ -141,6 +144,7 @@ export class ForemanDatabase {
       models: {
         codex: mergeModelCatalog(defaults.models.codex, saved.models?.codex),
         claude: mergeModelCatalog(defaults.models.claude, saved.models?.claude),
+        zcode: defaults.models.zcode,
         custom: mergeModelCatalog(defaults.models.custom, saved.models?.custom)
       } } as AppSettings
   }
@@ -159,11 +163,11 @@ export class ForemanDatabase {
     return run
   }
 
-  updateRun(id: string, fields: Partial<Pick<RunSummary, 'status' | 'plan' | 'result' | 'review' | 'error' | 'executionWorkspace' | 'branch' | 'baseCommit' | 'isolated' | 'resolution' | 'deliveryEvidence' | 'contract' | 'implementationReport' | 'reviewDecision' | 'verification' | 'checkpointPhase' | 'pauseReason' | 'additionalInstructions' | 'reviewAttempt' | 'usageTokens' | 'costUsd' | 'stageMetrics' | 'agentTasks' | 'executionPolicy'>>): void {
+  updateRun(id: string, fields: Partial<Pick<RunSummary, 'status' | 'plan' | 'result' | 'review' | 'error' | 'executionWorkspace' | 'branch' | 'baseCommit' | 'isolated' | 'resolution' | 'deliveryEvidence' | 'contract' | 'implementationReport' | 'reviewDecision' | 'verification' | 'checkpointPhase' | 'pauseReason' | 'additionalInstructions' | 'reviewAttempt' | 'usageTokens' | 'costUsd' | 'stageMetrics' | 'agentTasks' | 'executionPolicy' | 'failure'>>): void {
     const entries = Object.entries(fields).filter(([, value]) => value !== undefined)
     if (!entries.length) return
     const columns: Record<string, string> = {
-      agentTasks: 'agent_tasks', executionPolicy: 'execution_policy', deliveryEvidence: 'delivery_evidence', status: 'status', plan: 'plan', result: 'result', review: 'review', error: 'error',
+      failure: 'failure', agentTasks: 'agent_tasks', executionPolicy: 'execution_policy', deliveryEvidence: 'delivery_evidence', status: 'status', plan: 'plan', result: 'result', review: 'review', error: 'error',
       executionWorkspace: 'execution_workspace', branch: 'branch', baseCommit: 'base_commit',
       isolated: 'isolated', resolution: 'resolution', contract: 'contract', implementationReport: 'implementation_report',
       reviewDecision: 'review_decision', verification: 'verification', checkpointPhase: 'checkpoint_phase', pauseReason: 'pause_reason', additionalInstructions: 'additional_instructions', reviewAttempt: 'review_attempt', usageTokens:'usage_tokens',costUsd:'cost_usd',stageMetrics:'stage_metrics'
@@ -171,6 +175,21 @@ export class ForemanDatabase {
     const set = entries.map(([key]) => `${columns[key]} = ?`).join(', ')
     this.db.prepare(`UPDATE runs SET ${set}, updated_at = ? WHERE id = ?`)
       .run(...entries.map(([, value]) => typeof value === 'boolean' ? Number(value) : typeof value === 'object' ? JSON.stringify(value) : value), new Date().toISOString(), id)
+  }
+
+  invalidateRunEvidence(id: string, implementation: boolean): void {
+    this.db.prepare(`UPDATE runs SET verification = NULL, review_decision = NULL, review = NULL${implementation ? ', implementation_report = NULL, result = NULL' : ''} WHERE id = ?`).run(id)
+  }
+
+  beginRecovery(id: string, failureAt: string, phase: 'implementing' | 'verifying', agentTasks: RunSummary['agentTasks']): void {
+    const implementation = phase === 'implementing'
+    const result = this.db.prepare(`UPDATE runs SET status = 'queued', checkpoint_phase = ?, error = '', pause_reason = NULL,
+      agent_tasks = ?, verification = NULL, review_decision = NULL, review = NULL,
+      implementation_report = CASE WHEN ? THEN NULL ELSE implementation_report END,
+      result = CASE WHEN ? THEN NULL ELSE result END, updated_at = ?
+      WHERE id = ? AND status = 'failed' AND json_extract(failure, '$.at') = ?`)
+      .run(phase, JSON.stringify(agentTasks ?? []), Number(implementation), Number(implementation), new Date().toISOString(), id, failureAt)
+    if (Number(result.changes) !== 1) throw new Error('失败检查点已变化，请重新检查恢复条件')
   }
 
   addStageMetric(runId: string, metric: RunStageMetric): void {
@@ -221,7 +240,7 @@ export class ForemanDatabase {
 
   recoverInterruptedRuns(): number {
     const result = this.db.prepare(`
-      UPDATE runs SET checkpoint_phase = status, status = 'paused', pause_reason = 'interrupted', error = ?, updated_at = ?
+      UPDATE runs SET checkpoint_phase = CASE WHEN status = 'queued' THEN COALESCE(checkpoint_phase, status) ELSE status END, status = 'paused', pause_reason = 'interrupted', error = ?, updated_at = ?
       WHERE status IN ('queued', 'planning', 'implementing', 'verifying', 'reviewing')
     `).run('应用在任务运行期间退出。worktree 与检查点已保留，可恢复任务。', new Date().toISOString())
     return Number(result.changes)
@@ -406,7 +425,7 @@ function mergeModelCatalog(defaults: AppSettings['models'][ExecutorKind], saved?
 interface RunRow {
   id: string; title: string; objective: string; workspace: string; status: RunStatus
   created_at: string; updated_at: string; plan?: string; result?: string; review?: string; error?: string
-  agent_tasks?: string; execution_policy?: string; delivery_evidence?: string
+  agent_tasks?: string; execution_policy?: string; delivery_evidence?: string; failure?: string
   execution_workspace?: string; branch?: string; isolated?: number
   base_commit?: string; resolution?: RunSummary['resolution']
   contract?: string; implementation_report?: string; review_decision?: string; verification?: string
@@ -432,7 +451,7 @@ function mapRun(row: RunRow): RunSummary {
     branch: row.branch ?? undefined, baseCommit: row.base_commit ?? undefined,
     isolated: Boolean(row.isolated), resolution: row.resolution ?? 'open', deliveryEvidence: parseJson<RunSummary['deliveryEvidence']>(row.delivery_evidence),
     plan: row.plan ?? undefined, result: row.result ?? undefined,
-    review: row.review ?? undefined, error: row.error ?? undefined
+    review: row.review ?? undefined, error: row.error ?? undefined, failure: parseJson<RunSummary['failure']>(row.failure)
     , contract: parseJson<ExecutionContract>(row.contract), implementationReport: parseJson<ImplementationReport>(row.implementation_report),
     reviewDecision: parseJson<ReviewDecision>(row.review_decision), verification: parseJson<VerificationReport>(row.verification),
     checkpointPhase: row.checkpoint_phase ?? undefined, pauseReason: row.pause_reason ?? undefined, additionalInstructions: row.additional_instructions ?? undefined, reviewAttempt: row.review_attempt ?? 0, usageTokens:row.usage_tokens??0,costUsd:row.cost_usd??0,stageMetrics:parseJson<RunStageMetric[]>(row.stage_metrics) ?? []

@@ -59,9 +59,13 @@ jobs:
       - run: npm run typecheck
       - run: npx vitest run tests/process-tree.test.ts tests/validation.test.ts tests/role-protocol.test.ts
       - run: npm run dist:win
+      - name: Verify the NSIS application payload
+        run: node scripts/verify-windows-package.mjs
       - uses: actions/upload-artifact@v4
         with:
           name: model-foreman-windows-${{ github.ref_name }}
-          path: release/*.exe
+          path: |
+            release/*.exe
+            release/*-windows-verification.json
           if-no-files-found: error
           retention-days: 14

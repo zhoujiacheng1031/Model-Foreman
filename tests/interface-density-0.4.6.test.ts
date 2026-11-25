@@ -14,13 +14,13 @@ describe('0.4.6 interface hierarchy and density', () => {
     expect(slice('function WorkflowView', 'function AppSettingsView')).not.toContain('className="settings-head"')
     expect(slice('function MemoryView', 'function MemoryConfiguration')).not.toContain('className="settings-head"')
     expect(slice('function AppSettingsView', 'function ApprovalPanel')).not.toContain('className="settings-head"')
-    expect(slice('function AppSettingsView', 'function ApprovalPanel')).toContain('className="settings-card-actions"')
+    expect(slice('function AppSettingsView', 'function ApprovalPanel')).toContain('className="settings-content-heading"')
   })
 
   it('keeps workflow model availability beside each role title', () => {
     const workflow = slice('function WorkflowView', 'function AppSettingsView')
     expect(workflow).toContain('className="role-title-line"')
-    expect(workflow.indexOf('role-title-line')).toBeLessThan(workflow.indexOf('<label><span>执行器</span>'))
+    expect(workflow.indexOf('role-title-line')).toBeLessThan(workflow.indexOf('<ExecutorPicker'))
   })
 
   it('uses a dedicated rounded objective field and one operational card rhythm', () => {
@@ -36,7 +36,7 @@ describe('0.4.6 interface hierarchy and density', () => {
 
   it('keeps the goal action in its command bar and workflow actions in settings', () => {
     expect(slice('function GoalView', 'function Workbench')).toContain('className="page-command-bar"')
-    expect(slice('function WorkflowView', 'function AppSettingsView')).toContain('className="memory-settings-head settings-workflow-head"')
+    expect(slice('function WorkflowView', 'function AppSettingsView')).toContain('className="workflow-editor-nav"')
     expect(slice('function AppSettingsView', 'function ApprovalPanel')).toContain('<WorkflowView settings={settings}')
     expect(styles).toContain('.page-command-bar')
   })

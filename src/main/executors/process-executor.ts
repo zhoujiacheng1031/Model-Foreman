@@ -6,7 +6,7 @@ import { buildCliEnvironment } from './cli-environment'
 import { commandInvocation } from './command-launch'
 
 export abstract class ProcessExecutor {
-  protected readonly children = new Map<string, { runId: string; child: ChildProcessWithoutNullStreams }>()
+  protected readonly children = new Map<string, { runId: string; child: ChildProcessWithoutNullStreams; cancelled: boolean }>()
 
   protected runProcess(command: string, args: string[], request: ExecuteRequest, environment: NodeJS.ProcessEnv = {}): Promise<ExecuteResult> {
     return new Promise((resolve, reject) => {
@@ -19,7 +19,8 @@ export abstract class ProcessExecutor {
         stdio: ['pipe', 'pipe', 'pipe']
       })
       const executionId = request.executionId ?? `${request.runId}:${randomUUID()}`
-      this.children.set(executionId, { runId: request.runId, child })
+      const execution = { runId: request.runId, child, cancelled: false }
+      this.children.set(executionId, execution)
       let stdout = ''
       let stderr = ''
       let stderrPending = ''
@@ -42,14 +43,15 @@ export abstract class ProcessExecutor {
         this.children.delete(executionId)
         if (stderrPending) this.emitStderr(request, stderrPending)
         const exitCode = code ?? 1
-        if (exitCode !== 0) reject(new Error(stderr.trim() || `执行器退出，状态码 ${exitCode}`))
+        if (execution.cancelled) reject(new Error('执行器调用已取消'))
+        else if (exitCode !== 0) reject(new Error(stderr.trim() || `执行器退出，状态码 ${exitCode}`))
         else resolve({ output: this.extractOutput(stdout), exitCode, usage: extractUsage(stdout) })
       })
       writePrompt(child, request.prompt, reject)
     })
   }
 
-  protected runPreflightProcess(command: string, args: string[], workspace: string, prompt: string, environment: NodeJS.ProcessEnv = {}): Promise<void> {
+  protected runPreflightProcess(command: string, args: string[], workspace: string, prompt: string, environment: NodeJS.ProcessEnv = {}, validateOutput?: (output: string) => void): Promise<void> {
     return new Promise((resolve, reject) => {
       const env = { ...buildCliEnvironment(process.env, [command]), ...environment }
       const invocation = commandInvocation(command, args, env)
@@ -61,18 +63,22 @@ export abstract class ProcessExecutor {
       child.on('error', (error) => { clearTimeout(timer); reject(error) })
       child.on('close', (code) => {
         clearTimeout(timer)
-        if (timedOut) reject(new Error('API 预检超时（45 秒），请检查网络、代理或服务状态'))
+        if (timedOut) reject(new Error(preflightTimeoutMessage(output)))
         else if ((code ?? 1) !== 0) reject(new Error(output.trim() || `模型预检失败，执行器状态码 ${code ?? 1}`))
-        else resolve()
+        else {
+          try { validateOutput?.(output); resolve() }
+          catch (error) { reject(error) }
+        }
       })
       writePrompt(child, prompt, reject)
     })
   }
 
   cancel(runId: string): void {
-    for (const { runId: parent, child } of this.children.values()) {
-      if (parent !== runId || !child.pid) continue
-      terminateProcessTree(child)
+    for (const execution of this.children.values()) {
+      if (execution.runId !== runId || !execution.child.pid) continue
+      execution.cancelled = true
+      terminateProcessTree(execution.child)
     }
   }
 
@@ -91,6 +97,16 @@ export abstract class ProcessExecutor {
   private phaseFor(role: ExecuteRequest['role']) {
     return role === 'planner' ? 'planning' as const : role === 'reviewer' ? 'reviewing' as const : 'implementing' as const
   }
+}
+
+export function preflightTimeoutMessage(output: string): string {
+  if (/\b429\b|too many requests|rate.?limit/i.test(output)) {
+    const delay = output.match(/retrying[^\n]*?\bin\s+(\d+(?:\.\d+)?)s\b/i)?.[1]
+    const retry = delay ? `执行器提示约 ${Math.ceil(Number(delay))} 秒后重试；` : ''
+    // Keep the reason without copying CLI output that may contain credentials or URLs.
+    return `远端返回 HTTP 429（请求限流）；${retry}预检在 45 秒后结束，请稍后恢复任务。`
+  }
+  return 'API 预检超时（45 秒），请检查网络、代理或服务状态'
 }
 
 function writePrompt(child: ChildProcessWithoutNullStreams, prompt: string, reject: (reason?: unknown) => void): void {

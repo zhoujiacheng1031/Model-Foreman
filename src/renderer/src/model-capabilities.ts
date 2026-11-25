@@ -2,12 +2,20 @@ import type { AppSettings, ExecutorKind, ModelCapabilityScan, ModelCapabilityTar
 
 const roles: RoleKey[] = ['planner', 'implementer', 'reviewer']
 
+/** A connector check must not replace another connector's evidence or its timestamp. */
+export function mergeConnectorScan(previous: ModelCapabilityScan | null, scan: ModelCapabilityScan, kind: ExecutorKind): ModelCapabilityScan {
+  return { ...scan, models: [
+    ...(previous?.models.filter((item) => item.kind !== kind).map((item) => ({ ...item, checkedAt: item.checkedAt ?? previous.checkedAt })) ?? []),
+    ...scan.models.filter((item) => item.kind === kind).map((item) => ({ ...item, checkedAt: item.checkedAt ?? scan.checkedAt }))
+  ] }
+}
+
 /**
  * Capability scans are catalog-wide. Role selections are only annotations and
  * must never decide which models survive in the selector.
  */
 export function buildModelCapabilityTargets(settings: AppSettings): ModelCapabilityTarget[] {
-  return (['codex', 'claude', 'custom'] as ExecutorKind[]).flatMap((executor) => settings.models[executor].flatMap((model) => {
+  return (['codex', 'claude', 'zcode', 'custom'] as ExecutorKind[]).flatMap((executor) => settings.models[executor].flatMap((model) => {
     const selectedBy = roles.filter((role) => settings.roles[role].executor === executor && settings.roles[role].model === model.id)
     return selectedBy.length
       ? selectedBy.map((role) => ({ role, executor, model: model.id }))
@@ -35,4 +43,10 @@ export function selectableModelCatalog(settings: AppSettings, scan: ModelCapabil
     return 1
   }
   return models.map((model, index) => ({ model, index })).sort((left, right) => rank(left.model) - rank(right.model) || left.index - right.index).map(({ model }) => model)
+}
+
+/** A draft API entry is not yet a selectable executor model. */
+export function customModelIsComplete(model: ModelDefinition): boolean {
+  if (!model.protocol || !model.baseUrl?.trim() || !model.apiKey?.trim() || !model.remoteModel?.trim()) return false
+  try { new URL(model.baseUrl); return true } catch { return false }
 }

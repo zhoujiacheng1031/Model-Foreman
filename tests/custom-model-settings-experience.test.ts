@@ -22,10 +22,11 @@ describe('custom model settings experience', () => {
     expect(app).toContain('custom-model-check-result')
   })
 
-  it('renders custom models, capabilities, and role flow as peer settings cards', () => {
+  it('keeps custom models and connection checks in the connector owner, separate from role flow', () => {
     const workflow = app.slice(app.indexOf('function WorkflowView'), app.indexOf('function AppSettingsView'))
-    expect(workflow).toContain('<section className="custom-model-settings"')
-    expect(workflow).toContain('<section className="model-catalog-card" id="settings-model-catalog">')
+    expect(workflow).toContain('customEditor={<section className="custom-model-settings"')
+    expect(workflow).toContain('<ConnectorsView')
+    expect(workflow).not.toContain('id="settings-model-catalog"')
     expect(workflow).toContain('<section className="workflow-diagram settings-workflow-settings"')
     expect(workflow).not.toContain('return (\n    <section className="settings-workflow-settings"')
   })

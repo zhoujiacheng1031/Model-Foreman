@@ -1,6 +1,6 @@
 {
   "name": "model-foreman",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Local-first multi-model planning, implementation, and review workbench",
   "author": "Model Foreman",
@@ -12,6 +12,7 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:harness": "node scripts/run-harness-tests.mjs",
     "package": "npm run build && electron-builder --dir",
     "dist:mac": "npm run build && electron-builder --mac dmg",
     "dist:mac:adhoc": "npm run build && node scripts/build-adhoc-macos-release.mjs",

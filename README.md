@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://model-foreman.jiachengz135.chatgpt.site">产品官网</a> ·
   <a href="https://model-foreman.jiachengz135.chatgpt.site/guide">使用指南</a> ·
-  <a href="https://github.com/zhoujiacheng1031/Model-Foreman/releases/tag/v1.0.0">下载 v1.0.0</a>
+  <a href="https://github.com/zhoujiacheng1031/Model-Foreman/releases/tag/v1.0.1">下载 v1.0.1</a>
 </p>
 
 <p align="center">macOS Apple Silicon · Windows x64</p>
@@ -20,6 +20,13 @@
 Model Foreman 是本地优先的多模型、跨 Agent 开发编排工具。你可以让强模型负责理解目标、拆解任务与独立审查，让多个执行 Agent 按计划并行实现，再由 Foreman 汇总代码、运行工程验证，并将证据交给审查模型判断是否交付。
 
 规划、执行和审查可以使用不同的模型与执行器，各自配置推理强度、提示词和 Skill。Foreman 负责它们之间的任务分配、上下文传递、依赖调度、结果汇总与运行恢复。
+
+## v1.0.1：更清楚地配置、查找和接续任务
+
+- **流程总览**：在「设置 → 角色与流程」查看执行配置数量、Harness、串行或并行调度及返工链路；点击节点直达配置，按需展开模型与规则。
+- **任务检索**：运行记录支持关键词、项目和状态组合筛选，并分别统计待交付与已交付任务；未匹配时可以清除筛选。
+- **交付状态**：侧栏、最近任务、运行记录与详情统一显示「待交付／已交付／已放弃」，执行完成后可直接进入交付向导。
+- **恢复与布局**：失败任务提供接续入口，首次打开默认显示日志；详情页签按任务保存。分支使用背景标签，设置与窄窗口布局保持一致。
 
 ## 强模型把关：先规划，再执行，独立审查
 
@@ -63,13 +70,15 @@ flowchart TD
 
 ## 跨 Agent 编排：统一合同、上下文与结果
 
-支持 **Codex CLI、Claude Code**，以及通过现有 CLI 适配层使用 **OpenAI Responses / Anthropic Messages 兼容 API** 的自定义模型。可以由一种执行器规划、另一种执行器实现，再由独立配置的模型审查；同一任务的并行执行成员也可以混用这些执行器。
+支持 **Codex CLI、Claude Code、ZCode**，以及通过现有 CLI 适配层使用 **OpenAI Responses / Anthropic Messages 兼容 API** 的自定义模型。可以由一种执行器规划、另一种执行器实现，再由独立配置的模型审查；同一任务的并行执行成员也可以混用这些执行器。
+
+ZCode 沿用自身当前模型、凭据与推理设置，支持三个角色及并行执行成员；产品中显示「ZCode 当前模型 / 原生默认」。安装状态与实际远端预检分开显示，配置方法和验证边界见 [ZCode 接入说明](docs/architecture/zcode.md)。ZCode 接入已包含在 v1.0.1 中。
 
 Foreman 在这些执行器之间维护统一的工作约定：
 
 - **结构化交接**：规划输出执行合同，执行返回实现报告，审查返回裁决与问题清单；解析校验后再推进阶段。
 - **按依赖传递上下文**：执行 Agent 获得自己的过程记录，以及直接依赖中已汇总步骤的报告；保存最近一次调用实际使用的记忆快照，便于追溯。
-- **统一运行管理**：记录各阶段与 Agent 的状态、日志、Token、费用和耗时；支持暂停、检查点恢复及失败后重试。
+- **统一运行管理**：记录各阶段与 Agent 的状态、日志、Token、费用和耗时；支持暂停、检查点恢复及失败后接续。恢复前核对工作区与提交，复用有效步骤产出，再重新验证与审查；也可重新创建任务。
 - **统一交付证据**：将代码变更、验证报告与审查结论关联到同一任务，再通过交付流程合并。
 
 跨 Agent 的共享内容由 Foreman 管理，以任务合同、报告和经过筛选的记忆为单位；各 CLI 的私有会话历史不做双向同步。
@@ -95,6 +104,8 @@ Foreman 在这些执行器之间维护统一的工作约定：
 
 更多机制与接入边界见 [并行执行与记忆治理](docs/architecture/parallel-agents-memory.md) 和 [TencentDB Agent Memory 设计评估](docs/research/tencentdb-agent-memory-evaluation.md)。
 
+失败后的恢复条件、步骤复用及实测方式见 [失败恢复](docs/architecture/failure-recovery.md)。失败后接续能力已包含在 v1.0.1 中。
+
 ## 从一次任务到长期目标
 
 普通任务适合一次明确的功能、修复或文档改动。长期目标将成功标准组织成有依赖的子任务，复用同一套规划、执行、验证、审查和交付流程，按完成证据推进后续工作。
@@ -104,18 +115,29 @@ Foreman 在这些执行器之间维护统一的工作约定：
 <details>
 <summary>查看真实应用界面</summary>
 
-![Model Foreman 1.0.0 工作台](docs/images/workbench-1.0.0.jpg)
+![Model Foreman 1.0.1 运行记录与筛选](docs/images/run-history-1.0.1.png)
+
+![Model Foreman 1.0.1 角色与流程总览](docs/images/workflow-1.0.1.png)
+
+截图使用演示项目与模拟任务数据，展示实际应用界面。
 
 </details>
 
 ## 安装与快速开始
 
-[1.0.0 Release](https://github.com/zhoujiacheng1031/Model-Foreman/releases/tag/v1.0.0) 提供 macOS Apple Silicon（DMG）和 Windows x64（EXE）安装包，以及 SHA-256 校验文件。双平台 CI 构建与包内版本检查已通过；Windows 安装和界面尚未进行人工验收。
+[v1.0.1 Release](https://github.com/zhoujiacheng1031/Model-Foreman/releases/tag/v1.0.1) 提供双端安装包、SHA-256 校验文件和构建校验记录。
+
+| 平台 | 安装包 |
+| --- | --- |
+| macOS Apple Silicon | [下载 DMG](https://github.com/zhoujiacheng1031/Model-Foreman/releases/download/v1.0.1/Model-Foreman-1.0.1-arm64.dmg) |
+| Windows x64 | [下载 EXE](https://github.com/zhoujiacheng1031/Model-Foreman/releases/download/v1.0.1/Model-Foreman-Setup-1.0.1-x64.exe) |
+
+完整改动见 [更新记录](CHANGELOG.md)。构建和包内校验范围见 Release 附件中的 verification.json；Windows 安装与界面尚未进行人工验收。
 
 macOS 安装包使用临时签名、尚未公证；首次打开可能需要在“系统设置 → 隐私与安全性”中选择“仍要打开”。Windows 安装程序未配置商业代码签名证书，SmartScreen 可能显示来源提示。
 
 1. 安装对应平台的已发布安装包，或按下方说明从源码运行。
-2. 安装并登录所用的 Codex CLI 或 Claude Code CLI，在“设置 → 运行环境”检查状态。
+2. 安装并配置所用的 Codex CLI、Claude Code CLI 或 ZCode，在“设置 → 连接器”检查状态；ZCode 可使用独立 CLI，macOS 也可检测 Desktop 内置 CLI。
 3. 打开本地 Git 仓库、空目录，或从 GitHub 克隆项目。
 4. 配置角色与模型，点击“新任务”，选择普通任务或长期目标并填写目标。
 5. 按批准策略检查计划、验证结果与 Diff，通过交付向导完成合并。

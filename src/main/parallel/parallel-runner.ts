@@ -48,12 +48,13 @@ export class ParallelRunner {
       }
       for (const task of batch) update(task.id, { status: 'pending' })
       let batchFailed = false
+      let firstFailure: unknown
       const outcomes = await Promise.allSettled(batch.map(async (selected) => {
         let task = read().find((item) => item.id === selected.id)!
         try {
           assertActive()
           if (batchFailed) throw new Error('同批 Agent 已失败，尚未开始本步骤')
-          update(task.id, { status: 'running', attempt: task.attempt + 1 })
+          update(task.id, { status: 'running', attempt: task.attempt + 1, error: undefined })
           task = read().find((item) => item.id === task.id)!
           const report = await execute(task, this.database.getRun(run.id)!.run)
           assertActive()
@@ -63,14 +64,16 @@ export class ParallelRunner {
           assertActive()
           update(task.id, { commit, status: 'ready', error: undefined })
         } catch (error) {
+          const siblingFailed = batchFailed
+          if (!batchFailed) firstFailure = error
           batchFailed = true; cancel()
           const status = this.database.getRun(run.id)?.run.status
-          update(task.id, { status: status === 'paused' || status === 'cancelled' ? 'interrupted' : 'failed', error: String(error) })
+          update(task.id, { status: siblingFailed || status === 'paused' || status === 'cancelled' ? 'interrupted' : 'failed', error: String(error) })
           throw error
         }
       }))
       const failure = outcomes.find((item): item is PromiseRejectedResult => item.status === 'rejected')
-      if (failure) throw failure.reason
+      if (failure) throw firstFailure
     }
     const reports = read().map((task) => task.report!)
     return { summary: reports.map((report) => report.summary).join('\n'), filesChanged: [...new Set(reports.flatMap((report) => report.filesChanged))],

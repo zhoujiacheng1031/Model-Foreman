@@ -1,10 +1,10 @@
-export type ExecutorKind = 'codex' | 'claude' | 'custom'
+export type ExecutorKind = 'codex' | 'claude' | 'zcode' | 'custom'
 export type CustomModelProtocol = 'openai-responses' | 'anthropic-messages'
 export type SkillMode = 'auto' | 'explicit'
 export type SkillScope = 'project' | 'user' | 'plugin' | 'admin' | 'compatibility'
 export type RoleKey = 'planner' | 'implementer' | 'reviewer'
 export type RunStatus = 'queued' | 'planning' | 'awaiting_approval' | 'implementing' | 'verifying' | 'reviewing' | 'awaiting_review_approval' | 'paused' | 'completed' | 'failed' | 'cancelled'
-export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'default'
 export type RunResolution = 'open' | 'merged' | 'discarded'
 export type MemoryProviderKind = 'local' | 'tencentdb'
 export type MemoryKind = 'fact' | 'decision' | 'lesson' | 'procedure' | 'constraint'
@@ -44,6 +44,7 @@ export interface ModelRuntimeStatus {
 export interface ModelCapabilityTarget { role?: RoleKey; executor: ExecutorKind; model: string }
 export interface ModelCapabilityResult {
   kind: ExecutorKind; model: string; roles: RoleKey[]
+  checkedAt?: string
   availability: 'available' | 'partial' | 'unavailable'
   supportedEfforts: Effort[]; checks: ModelRuntimeStatus[]; message: string
 }
@@ -150,6 +151,8 @@ export interface RunEvent {
 export type RunStageKind = 'planner' | 'implementer' | 'verifier' | 'reviewer'
 export interface RunStageMetric {
   id: string
+  agentTaskId?: string
+  agentStepId?: string
   stage: RunStageKind
   label: string
   attempt: number
@@ -173,6 +176,33 @@ export interface AgentTask {
   workspace?: string; branch?: string; baseCommit?: string; commit?: string
   report?: ImplementationReport; error?: string; updatedAt: string
   memorySnapshot?: { id: string; at: string; headCommit?: string; entries: Array<{ id: string; version?: number; updatedAt: string; sourceCommit?: string }>; text: string }
+}
+
+export interface RecoveryWorkspaceEvidence {
+  headCommit: string
+  fingerprint: string
+}
+
+export interface RunFailure {
+  at: string
+  phase: RunStatus
+  message: string
+  checkpoint?: {
+    sourceHead: string
+    contractHash: string
+    workspace: RecoveryWorkspaceEvidence
+    agents: Array<{ taskId: string; workspace: RecoveryWorkspaceEvidence }>
+  }
+  checkpointError?: string
+}
+
+export interface RunRecoveryPlan {
+  runId: string
+  failureAt?: string
+  available: boolean
+  reason: string
+  phase: 'implementing' | 'verifying'
+  steps: Array<{ stepId: string; title: string; action: 'reuse' | 'integrate' | 'retry' | 'pending' }>
 }
 
 export interface RunSummary {
@@ -206,6 +236,7 @@ export interface RunSummary {
   costUsd?: number
   stageMetrics?: RunStageMetric[]
   error?: string
+  failure?: RunFailure
 }
 
 export interface ExecutorCapability {
@@ -213,7 +244,7 @@ export interface ExecutorCapability {
   installed: boolean
   executable: string
   version: string
-  authenticated: boolean
+  authenticated?: boolean
   authenticationMessage: string
 }
 
@@ -412,6 +443,8 @@ export interface ForemanBridge {
   executeDeliveryStep(runId: string, action: DeliveryGuideAction): Promise<DeliveryGuide | RunSummary>
   discardRun(runId: string): Promise<RunSummary>
   retryRun(runId: string): Promise<RunSummary>
+  getRunRecovery(runId: string): Promise<RunRecoveryPlan>
+  recoverRun(runId: string, failureAt: string): Promise<RunSummary>
   deleteRun(runId: string): Promise<void>
   listMemories(workspace?: string): Promise<MemoryEntry[]>
   curateMemories(input: MemoryCurationInput): Promise<MemoryEntry>

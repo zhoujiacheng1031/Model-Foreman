@@ -1,12 +1,16 @@
 import { z } from 'zod'
 
 const roleSchema = z.object({
-  executor: z.enum(['codex', 'claude', 'custom']),
+  executor: z.enum(['codex', 'claude', 'zcode', 'custom']),
   model: z.string().trim().min(1, '模型 ID 不能为空'),
-  effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']),
+  effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'default']),
   prompt: z.string().trim().min(1, '角色提示词不能为空').max(30_000, '角色提示词过长'),
   skillMode: z.enum(['auto', 'explicit']),
   skills: z.array(z.string().trim().min(2).max(160)).max(24)
+}).superRefine((role, ctx) => {
+  if (role.executor === 'zcode') {
+    if (role.model !== 'native-default' || role.effort !== 'default') ctx.addIssue({ code: 'custom', message: 'ZCode 使用当前原生模型与默认推理设置', path: ['model'] })
+  } else if (role.effort === 'default') ctx.addIssue({ code: 'custom', message: '此执行器需要选择明确的推理强度', path: ['effort'] })
 })
 const modelDefinitionSchema = () => z.object({ id: z.string().trim().min(1).max(160), label: z.string().trim().min(1).max(160),
   efforts: z.array(z.enum(['low', 'medium', 'high', 'xhigh', 'max'])).min(1), source: z.enum(['builtin', 'custom']) })
@@ -26,7 +30,9 @@ export const appSettingsSchema = z.object({
     planner: z.object({ autoApprove: z.boolean(), minConfidence: z.number().min(0).max(1) }),
     reviewer: z.object({ autoApprove: z.boolean(), minConfidence: z.number().min(0).max(1) })
   }),
-  models: z.object({ codex: z.array(modelDefinitionSchema()).max(40), claude: z.array(modelDefinitionSchema()).max(40), custom: z.array(customModelDefinitionSchema).max(24) }),
+  models: z.object({ codex: z.array(modelDefinitionSchema()).max(40), claude: z.array(modelDefinitionSchema()).max(40),
+    zcode: z.array(z.object({ id: z.literal('native-default'), label: z.string().trim().min(1).max(160), efforts: z.tuple([z.literal('default')]), source: z.literal('builtin') })).length(1),
+    custom: z.array(customModelDefinitionSchema).max(24) }),
   memory: z.object({
     enabled: z.boolean(), provider: z.enum(['local', 'tencentdb']),
     maxItems: z.number().int().min(1).max(20), maxChars: z.number().int().min(500).max(30_000), requireApproval: z.boolean(),

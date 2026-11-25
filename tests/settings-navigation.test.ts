@@ -11,25 +11,25 @@ const props = {
 }
 
 describe('settings navigation', () => {
-  it('opens the environment group without rendering every other settings form below it', () => {
+  it('opens the connectors group without rendering every other settings form below it', () => {
     const html = renderToStaticMarkup(createElement(AppSettingsView, props))
-    expect(html).toContain('执行器、Desktop 与 Skill 环境')
+    expect(html).toContain('id="settings-connectors"')
+    expect(html).toContain('CLI、Desktop、API 与模型连接')
+    expect(html).toContain('Codex CLI连接状态')
     expect(html).not.toContain('自定义 API 模型')
     expect(html).not.toContain('独立验证门禁默认值')
     expect(html).not.toContain('长期记忆设置')
   })
 
   it.each([
-    ['custom-model-settings', '自定义 API 模型'],
-    ['settings-model-catalog', '一键检测全部模型'],
-    ['role-workflow-settings', '最大返工轮次'],
+    ['role-workflow-settings', '并行与成员'],
     ['settings-verification', '固定命令'],
     ['settings-approvals', '最低置信度'],
     ['settings-memory', '记忆 Provider']
   ] as const)('keeps the %s controls reachable without unrelated forms', (section, control) => {
     const html = renderToStaticMarkup(createElement(AppSettingsView, { ...props, section }))
     expect(html.includes(control)).toBe(true)
-    expect(html.includes('id="settings-environment"')).toBe(false)
+    expect(html.includes('id="settings-connectors"')).toBe(false)
     expect(html.includes('aria-current="page"')).toBe(true)
     for (const group of settingsGroups) {
       if (group.id !== section) expect(html.includes(`id="${group.id}"`)).toBe(false)

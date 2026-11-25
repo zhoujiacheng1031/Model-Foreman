@@ -40,13 +40,14 @@ export class AgentEnvironmentService {
   async probeDesktops(): Promise<DesktopCapability[]> {
     return Promise.all([
       this.probeDesktop('codex', ['ChatGPT.app', 'Codex.app', 'ChatGPT.exe', 'Codex.exe', 'ChatGPT.lnk', 'Codex.lnk']),
-      this.probeDesktop('claude', ['Claude.app', 'Claude.exe', 'Claude.lnk'])
+      this.probeDesktop('claude', ['Claude.app', 'Claude.exe', 'Claude.lnk']),
+      this.probeDesktop('zcode', ['ZCode.app', 'ZCode.exe', 'ZCode.lnk'])
     ])
   }
 
   async desktop(kind: ExecutorKind): Promise<DesktopCapability> {
     const desktops = await this.probeDesktops()
-    return desktops.find((item) => item.kind === kind)!
+    return desktops.find((item) => item.kind === kind) ?? { kind, installed: false, appName: kind, appPath: '', handoff: 'launcher', message: '此执行器没有可打开的 Desktop' }
   }
 
   async discoverSkills(workspace: string): Promise<AgentSkill[]> {
@@ -88,7 +89,7 @@ export class AgentEnvironmentService {
     const store = await windowsStoreDesktop(kind)
     if (store) return store
     return {
-      kind, installed: false, appName: kind === 'codex' ? 'ChatGPT / Codex' : 'Claude', appPath: '',
+      kind, installed: false, appName: kind === 'codex' ? 'ChatGPT / Codex' : kind === 'zcode' ? 'ZCode' : 'Claude', appPath: '',
       handoff: kind === 'claude' ? 'cli-session' : 'launcher', message: '未在系统应用目录中检测到'
     }
   }
@@ -247,12 +248,13 @@ function defaultApplicationRoots(home: string): string[] {
     win32.join(local, 'Programs', 'ChatGPT'),
     win32.join(local, 'Programs', 'Codex'),
     win32.join(local, 'Programs', 'Claude'),
+    win32.join(local, 'Programs', 'ZCode'),
     win32.join(roaming, 'Microsoft', 'Windows', 'Start Menu', 'Programs')
   ]
 }
 
 async function windowsStoreDesktop(kind: ExecutorKind): Promise<DesktopCapability | null> {
-  if (process.platform !== 'win32') return null
+  if (process.platform !== 'win32' || (kind !== 'codex' && kind !== 'claude')) return null
   const pattern = kind === 'codex' ? '(OpenAI.*(ChatGPT|Codex)|(ChatGPT|Codex).*OpenAI)' : '(Anthropic.*Claude|Claude.*Anthropic)'
   const script = `$p=Get-AppxPackage | Where-Object { $_.Name -match '${pattern}' } | Select-Object -First 1; if($p){$p.PackageFamilyName}`
   try {

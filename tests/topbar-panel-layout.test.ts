@@ -39,7 +39,7 @@ describe('topbar panel controls', () => {
     const sidebar = app.slice(app.indexOf('<aside className="sidebar">'), app.indexOf('</aside>'))
 
     expect(sidebar).not.toContain('secondary-nav')
-    expect(sidebar.lastIndexOf('runtime-health')).toBeGreaterThan(sidebar.lastIndexOf('sidebar-section'))
+    expect(sidebar).not.toContain('runtime-health')
     expect(styles).toMatch(/\.runtime-health\s*\{[^}]*margin-top:\s*auto/)
   })
 })

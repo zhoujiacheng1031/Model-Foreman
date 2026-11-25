@@ -1,5 +1,6 @@
 import type { Effort, ExecutorKind, ModelCapabilityResult, ModelCapabilityScan, ModelCapabilityTarget, ModelRuntimeStatus, RoleConfig } from '../shared/contracts'
 import type { ExecutorRegistry } from './executors/registry'
+import { executorLabel, effortLabel, modelLabel } from '../shared/executors'
 
 type ModelConfig = Pick<RoleConfig, 'executor' | 'model' | 'effort'>
 type FailureCategory = Exclude<ModelRuntimeStatus['category'], 'ready'>
@@ -11,6 +12,7 @@ export class ModelPreflightError extends Error {
 
 export class ModelRuntimeGate {
   private readonly cache = new Map<string, { expires: number; status: ModelRuntimeStatus }>()
+  private readonly pending = new Map<string, Promise<ModelRuntimeStatus>>()
   constructor(private readonly registry: ExecutorRegistry, private readonly cacheMs = 10 * 60_000) {}
 
   async ensure(config: ModelConfig, workspace: string): Promise<ModelRuntimeStatus> {
@@ -20,9 +22,21 @@ export class ModelRuntimeGate {
   }
 
   async check(config: ModelConfig, workspace: string): Promise<ModelRuntimeStatus> {
-    const key = `${config.executor}\0${config.model}\0${config.effort}`
+    const key = `${config.executor}\0${config.model}\0${config.effort}${config.executor === 'zcode' ? '\0' + workspace : ''}`
     const cached = this.cache.get(key)
-    if (cached && cached.expires > Date.now()) return { ...cached.status, cached: true }
+    if (config.executor !== 'zcode' && cached && cached.expires > Date.now()) return { ...cached.status, cached: true }
+    const existing = this.pending.get(key)
+    if (existing) return existing
+    const operation = this.inspect(config, workspace)
+    this.pending.set(key, operation)
+    try {
+      const status = await operation
+      if (config.executor !== 'zcode' && status.available && this.pending.get(key) === operation) this.cache.set(key, { expires: Date.now() + this.cacheMs, status })
+      return status
+    } finally { if (this.pending.get(key) === operation) this.pending.delete(key) }
+  }
+
+  private async inspect(config: ModelConfig, workspace: string): Promise<ModelRuntimeStatus> {
     const executor = this.registry.get(config.executor)
     const capability = await executor.probe()
     if (!capability.installed) return failure(config, 'cli', `${providerName(config.executor)} CLI 未安装或不可执行。请安装 CLI 后重新检测。`)
@@ -30,8 +44,7 @@ export class ModelRuntimeGate {
     try {
       await executor.preflight?.({ model: config.model, effort: config.effort, workspace })
       const status: ModelRuntimeStatus = { kind: config.executor, model: config.model, effort: config.effort, available: true,
-        category: 'ready', message: `${config.model} · ${config.effort} 已通过远端 API 预检`, checkedAt: new Date().toISOString(), cached: false }
-      this.cache.set(key, { expires: Date.now() + this.cacheMs, status })
+        category: 'ready', message: `${modelLabel(config.model)} · ${effortLabel(config.effort)} 已通过远端 API 预检${config.executor === 'zcode' ? '；模型与推理选项由 ZCode 自身配置管理' : ''}`, checkedAt: new Date().toISOString(), cached: false }
       return status
     } catch (error) {
       const raw = error instanceof Error ? error.message : String(error)
@@ -50,13 +63,13 @@ export class ModelRuntimeGate {
       } else unique.set(key, { kind: target.executor, model: target.model, roles: target.role ? [target.role] : [] })
     }
     const models = await mapWithConcurrency([...unique.values()], 2, async (target): Promise<ModelCapabilityResult> => {
-      const candidateEfforts = target.kind === 'custom' ? ['medium'] as Effort[] : allEfforts
+      const candidateEfforts = target.kind === 'zcode' ? ['default'] as Effort[] : target.kind === 'custom' ? ['medium'] as Effort[] : allEfforts
       const checks = await mapWithConcurrency(candidateEfforts, 2, (effort) => this.check({ executor: target.kind, model: target.model, effort }, workspace))
       const supportedEfforts = checks.filter((check) => check.available).map((check) => check.effort)
       const availability = supportedEfforts.length === candidateEfforts.length ? 'available' : supportedEfforts.length ? 'partial' : 'unavailable'
       const failures = [...new Set(checks.filter((check) => !check.available).map((check) => check.message))]
       const message = availability === 'available'
-        ? '远程 API 可用，五档推理强度全部通过'
+        ? target.kind === 'zcode' ? 'ZCode 原生当前模型预检通过；推理设置由原生客户端管理' : `远程 API 可用，${candidateEfforts.length} 档推理强度全部通过`
         : availability === 'partial'
           ? `远程 API 可用，${supportedEfforts.length} / ${candidateEfforts.length} 档推理强度通过`
           : failures[0] || '没有可用的模型与推理强度组合'
@@ -67,6 +80,7 @@ export class ModelRuntimeGate {
 
   invalidate(kind?: ExecutorKind): void {
     for (const key of this.cache.keys()) if (!kind || key.startsWith(`${kind}\0`)) this.cache.delete(key)
+    for (const key of this.pending.keys()) if (!kind || key.startsWith(`${kind}\0`)) this.pending.delete(key)
   }
 }
 
@@ -78,7 +92,7 @@ function failure(config: ModelConfig, category: FailureCategory, message: string
 function classifyFailure(message: string): FailureCategory {
   if (/model.+(?:not found|does not exist|unknown|unavailable)|unsupported model|invalid model/i.test(message)) return 'model'
   if (/effort|reasoning.+(?:unsupported|invalid|not supported)/i.test(message)) return 'effort'
-  if (/rate.?limit|quota|credit|billing|insufficient/i.test(message)) return 'quota'
+  if (/\b429\b|too many requests|rate.?limit|quota|credit|billing|insufficient/i.test(message)) return 'quota'
   if (/unauthori[sz]ed|authentication|not logged in|login required|invalid.+(?:token|key)/i.test(message)) return 'authentication'
   if (/timed? ?out|econn|enotfound|network|fetch failed|service unavailable|502|503|504|api/i.test(message)) return 'api'
   return 'unknown'
@@ -86,7 +100,7 @@ function classifyFailure(message: string): FailureCategory {
 function failureLabel(category: FailureCategory): string {
   return ({ cli: '执行器不可用', authentication: '授权不可用', model: '模型不可用', effort: '推理强度不兼容', api: '远端 API 不可用', quota: 'API 额度或限流', unknown: '模型预检失败' })[category]
 }
-function providerName(kind: ExecutorKind): string { return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude Code' : '自定义 API' }
+function providerName(kind: ExecutorKind): string { return executorLabel(kind) }
 function compact(value: string): string { return value.replace(/\s+/g, ' ').trim().slice(0, 1200) }
 
 export function supportsEffort(efforts: Effort[], effort: Effort): boolean { return efforts.includes(effort) }

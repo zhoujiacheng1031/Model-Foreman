@@ -20,6 +20,7 @@ import { discoverClaudeModelIds } from './executors/claude-model-discovery'
 import { TencentDbSetupService } from './memory/tencentdb-setup'
 import { CodexExecutor } from './executors/codex'
 import { ClaudeExecutor } from './executors/claude'
+import { ZcodeExecutor } from './executors/zcode'
 import { CustomApiExecutor } from './executors/custom-api'
 
 let mainWindow: BrowserWindow | null = null
@@ -77,7 +78,7 @@ function registerIpc(): void {
     return new ModelRuntimeGate(new ExecutorRegistry([executor]), 0).check({ executor: 'custom', model: model.id, effort: 'medium' }, workspace)
   })
   ipcMain.handle('models:scan-capabilities', async (_event, targets: import('../shared/contracts').ModelCapabilityTarget[], workspace: string) => {
-    const discovered = await discoverClaudeModelIds(undefined, workspace)
+    const discovered = targets.some((target) => target.executor === 'claude') ? await discoverClaudeModelIds(undefined, workspace) : []
     return modelRuntime.scan([...targets, ...discovered.map((model) => ({ executor: 'claude' as const, model }))], workspace)
   })
   ipcMain.handle('agent-environment:inspect', (_event, workspace: string) => agentEnvironment.inspect(workspace))
@@ -123,6 +124,8 @@ function registerIpc(): void {
   ipcMain.handle('runs:delivery-step', (_event, runId: string, action: DeliveryGuideAction) => delivery.executeStep(runId, action))
   ipcMain.handle('runs:discard', (_event, runId: string) => delivery.discard(runId))
   ipcMain.handle('runs:retry', (_event, runId: string) => runLifecycle.retry(runId))
+  ipcMain.handle('runs:recovery', (_event, runId: string) => orchestrator.getRecovery(runId))
+  ipcMain.handle('runs:recover', (_event, runId: string, failureAt: string) => orchestrator.recover(runId, failureAt))
   ipcMain.handle('runs:delete', (_event, runId: string) => runLifecycle.delete(runId))
   ipcMain.handle('memory:list', (_event, workspace?: string) => memory.list(workspace))
   ipcMain.handle('memory:curate', (_event, input: unknown) => database.curateMemories(validated(memoryCurationSchema, input)))
@@ -162,7 +165,7 @@ app.whenReady().then(() => {
   const defaultWorkspace = process.cwd()
   database = new ForemanDatabase(join(app.getPath('userData'), 'foreman.db'), defaultWorkspace)
   database.recoverInterruptedRuns()
-  registry = new ExecutorRegistry([new CodexExecutor(), new ClaudeExecutor(), new CustomApiExecutor((id) => database.getSettings().models.custom.find((model) => model.id === id))])
+  registry = new ExecutorRegistry([new CodexExecutor(), new ClaudeExecutor(), new ZcodeExecutor(), new CustomApiExecutor((id) => database.getSettings().models.custom.find((model) => model.id === id))])
   modelRuntime = new ModelRuntimeGate(registry)
   agentEnvironment = new AgentEnvironmentService()
   repositories = new RepositoryService()

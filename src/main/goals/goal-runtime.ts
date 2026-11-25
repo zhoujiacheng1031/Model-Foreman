@@ -77,6 +77,17 @@ export class GoalRuntime {
         } catch (error) { return this.block(id, current, `自动交付失败：${message(error)}`) }
       } else if (['failed','cancelled'].includes(run.status)) {
         if (current.attempt < current.maxAttempts) {
+          if (run.status === 'failed' && goal.workspaceFingerprint === await this.fingerprint(goal.workspace)) {
+            const recovery = await this.orchestrator.getRecovery(run.id, true)
+            if (recovery.available && recovery.failureAt) {
+              try {
+                await this.orchestrator.recover(run.id, recovery.failureAt, true)
+                this.db.updateGoalTask(current.id, { status: 'running', attempt: current.attempt + 1 })
+                this.db.updateGoal(id, { status: 'active', iteration: goal.iteration + 1, terminalReason: `第 ${current.attempt + 1} 次尝试：从失败检查点继续，复用已有产出` })
+                return
+              } catch (error) { return this.block(id, current, `恢复前检查失败：${message(error)}`) }
+            }
+          }
           this.db.updateGoalTask(current.id, { status: 'ready', runHistoryIds:[...new Set([...current.runHistoryIds,run.id])], runId: undefined })
           this.db.updateGoal(id, { currentTaskId: undefined, status: 'active', iteration: goal.iteration + 1, terminalReason: `任务失败，准备第 ${current.attempt + 1} 次重试` })
           detail = this.required(id)

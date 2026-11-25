@@ -11,6 +11,7 @@ import { RoleProtocol, executionContractSchema } from './protocols/role-protocol
 import type { VerificationModule } from './verification/types'
 import { LocalVerificationModule } from './verification/local-verification'
 import { ModelPreflightError, ModelRuntimeGate } from './model-runtime'
+import { RunRecovery } from './run-recovery'
 
 type EventSink = (event: RunEvent) => void
 
@@ -18,6 +19,8 @@ export class Orchestrator {
   private readonly cancelled = new Set<string>()
   private readonly paused = new Set<string>()
   private readonly active = new Set<string>()
+  private readonly recovering = new Set<string>()
+  private readonly recovery = new RunRecovery()
 
   constructor(
     private readonly database: ForemanDatabase,
@@ -107,7 +110,7 @@ export class Orchestrator {
     const run = this.database.getRun(runId)?.run
     if (!run || !this.active.has(runId)) throw new Error('任务当前不可暂停')
     this.paused.add(runId); this.executors.cancel(runId); this.verification.cancel(runId)
-    this.database.updateRun(runId, { checkpointPhase: run.status, status: 'paused', pauseReason: 'user', error: '任务已由用户中止；当前 worktree 和检查点已保留。' })
+    this.database.updateRun(runId, { checkpointPhase: run.status === 'queued' ? run.checkpointPhase ?? 'queued' : run.status, status: 'paused', pauseReason: 'user', error: '任务已由用户中止；当前 worktree 和检查点已保留。' })
     this.emit(runId, 'paused', 'status', `任务已暂停，检查点位于 ${run.status}`)
     const started = Date.now()
     while (this.active.has(runId) && Date.now() - started < 2000) await new Promise((resolve) => setTimeout(resolve, 10))
@@ -128,6 +131,33 @@ export class Orchestrator {
     return updated
   }
 
+  async getRecovery(runId: string, fromGoal = false) {
+    const plan = await this.recovery.inspect(this.requireRun(runId))
+    if (!fromGoal && this.database.isRunReferencedByGoal(runId)) {
+      plan.available = false
+      plan.reason = '此任务属于长期目标，请在目标页面继续处理或重新规划，以保留预算与尝试次数约束。'
+    }
+    return plan
+  }
+
+  async recover(runId: string, failureAt: string, fromGoal = false): Promise<RunSummary> {
+    if (this.active.has(runId) || this.recovering.has(runId)) throw new Error('任务已经在运行或检查恢复条件')
+    this.recovering.add(runId)
+    try {
+      const plan = await this.getRecovery(runId, fromGoal)
+      if (!plan.available) throw new Error(plan.reason)
+      const run = this.requireRun(runId)
+      if (!failureAt || run.status !== 'failed' || run.failure?.at !== failureAt || plan.failureAt !== failureAt) throw new Error('失败检查点已变化，请重新检查恢复条件')
+      this.database.beginRecovery(runId, failureAt, plan.phase,
+        run.agentTasks?.map((task) => task.status === 'failed' || task.status === 'running' ? { ...task, status: 'interrupted' as const } : task))
+      this.paused.delete(runId); this.cancelled.delete(runId)
+      this.emit(runId, 'queued', 'status', `从失败检查点继续：${plan.reason}复用 ${plan.steps.filter((step) => step.action === 'reuse').length} 步，待汇总 ${plan.steps.filter((step) => step.action === 'integrate').length} 步。原失败：${run.failure!.message}`)
+      const updated = this.requireRun(runId)
+      this.launch(runId, () => this.implement(updated))
+      return updated
+    } finally { this.recovering.delete(runId) }
+  }
+
   cancel(runId: string): void {
     if (this.active.has(runId)) this.cancelled.add(runId)
     this.paused.delete(runId)
@@ -139,11 +169,12 @@ export class Orchestrator {
 
   shutdown(): void {
     for (const runId of this.active) {
+      const run = this.requireRun(runId)
       this.paused.add(runId)
       this.executors.cancel(runId)
       this.verification.cancel(runId)
       this.database.updateRun(runId, {
-        checkpointPhase: this.database.getRun(runId)?.run.status, status: 'paused', pauseReason: 'interrupted', error: '应用退出，活动执行器已终止；可从检查点恢复。'
+        checkpointPhase: run.status === 'queued' ? run.checkpointPhase ?? 'queued' : run.status, status: 'paused', pauseReason: 'interrupted', error: '应用退出，活动执行器已终止；可从检查点恢复。'
       })
     }
   }
@@ -193,6 +224,7 @@ export class Orchestrator {
           verification = run.verification
           this.emit(run.id, 'reviewing', 'status', '已从审核检查点恢复，复用此前独立验证证据')
         } else {
+          this.database.invalidateRunEvidence(run.id, false)
           this.database.updateRun(run.id, { status: 'verifying', checkpointPhase: 'verifying' })
           this.emit(run.id, 'verifying', 'status', 'Foreman 正在独立执行验证门禁')
           const suggested = contract.steps.flatMap((step) => step.verificationCommands)
@@ -233,8 +265,11 @@ export class Orchestrator {
           return
         }
         if (attempt === settings.maxReviewLoops) throw new Error(`审核在 ${attempt + 1} 轮后仍未通过`)
+        this.database.invalidateRunEvidence(run.id, true)
+        this.database.updateRun(run.id, { reviewAttempt: attempt + 1, checkpointPhase: 'implementing',
+          additionalInstructions: [this.requireRun(run.id).additionalInstructions, this.reworkPrompt(run, reviewDecision, verification)].filter(Boolean).join('\n\n') })
         implementationReport = await this.runStructuredRole('implementer', run, settings, this.reworkPrompt(run, reviewDecision, verification))
-        this.database.updateRun(run.id, { implementationReport, result: JSON.stringify(implementationReport, null, 2), reviewAttempt: attempt + 1 })
+        this.database.updateRun(run.id, { implementationReport, result: JSON.stringify(implementationReport, null, 2), reviewAttempt: attempt + 1, checkpointPhase: 'verifying' })
     }
   }
 
@@ -245,7 +280,7 @@ export class Orchestrator {
     this.database.updateRun(run.id, { status: 'implementing', checkpointPhase: 'implementing' })
     return new ParallelRunner(this.database).execute(run, settings, () => this.assertActive(run.id), async (task, current) => {
       const step = current.contract!.steps.find((item) => item.id === task.stepId)!
-      const prompt = `任务目标：${run.objective}\n你只负责步骤 ${task.stepId}：${JSON.stringify(step)}\n允许修改范围：${task.files.join('、') || '本隔离工作区'}\n其他 agent 正在独立工作，不要修改其他工作区、切换分支或操作共享服务。只使用本工作区的测试资源；需要共享数据库或端口时先报告阻塞。\n补充要求：${run.additionalInstructions || '无'}\n完成后返回真实改动、命令及未解决事项，Foreman 会汇总后独立验证。`
+      const prompt = `任务目标：${run.objective}\n你只负责步骤 ${task.stepId}：${JSON.stringify(step)}\n允许修改范围：${task.files.join('、') || '本隔离工作区'}\n其他 agent 正在独立工作，不要修改其他工作区、切换分支或操作共享服务。只使用本工作区的测试资源；需要共享数据库或端口时先报告阻塞。\n补充要求：${run.additionalInstructions || '无'}\n${task.attempt > 1 ? '这是接续执行：先检查保留的文件和过程记录，再完成剩余工作；外部操作结果不确定时先核实，不要盲目重复。\n' : ''}完成后返回真实改动、命令及未解决事项，Foreman 会汇总后独立验证。`
       return this.runStructuredRole('implementer', current, settings, prompt, task)
     }, () => this.executors.cancel(run.id))
   }
@@ -258,7 +293,7 @@ export class Orchestrator {
     this.assertActive(run.id)
     if (agent && this.requireRun(run.id).agentTasks?.some((task) => task.status === 'failed')) throw new Error('同任务 Agent 已失败，停止启动新进程')
     const phase: RunStatus = role === 'planner' ? 'planning' : role === 'reviewer' ? 'reviewing' : 'implementing'
-    this.database.updateRun(run.id, { status: phase })
+    this.database.updateRun(run.id, { status: phase, checkpointPhase: phase })
     this.emit(run.id, phase, 'status', `${roleLabel(role)} · ${config.executor} / ${config.model} / ${config.effort}`)
     const packet = await this.memory.prepare({ workspace: run.workspace, objective: run.objective, role, headCommit: agent?.baseCommit, executionWorkspace: workspace }, settings)
     for (const warning of packet.warnings ?? []) this.emit(run.id, phase, 'status', warning)
@@ -288,8 +323,8 @@ export class Orchestrator {
         this.database.updateRun(run.id,{ usageTokens:(current?.usageTokens??0)+usage.inputTokens+usage.outputTokens,costUsd:(current?.costUsd??0)+(usage.costUsd??0) })
       }
       this.recordStageMetric(run.id, {
-        stage: role, label: `${agent ? `Agent ${agent.stepId}` : roleLabel(role)} · 第 ${(this.database.getRun(run.id)?.run.reviewAttempt ?? 0) + 1} 轮`,
-        attempt: (this.database.getRun(run.id)?.run.reviewAttempt ?? 0) + 1, status: 'completed', executor: config.executor, model: config.model,
+        stage: role, agentTaskId: agent?.id, agentStepId: agent?.stepId, label: `${agent ? `Agent ${agent.stepId}` : roleLabel(role)} · 第 ${agent?.attempt ?? (this.database.getRun(run.id)?.run.reviewAttempt ?? 0) + 1} 次`,
+        attempt: agent?.attempt ?? (this.database.getRun(run.id)?.run.reviewAttempt ?? 0) + 1, status: 'completed', executor: config.executor, model: config.model,
         startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - started, inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens, costUsd: usage.costUsd ?? 0, resourceDetail: `${config.effort} · ${packet.entries.length} 条记忆 · ${config.skills.length} 个指定 Skill`
       })
@@ -297,8 +332,8 @@ export class Orchestrator {
     } catch (error) {
       const problem = error instanceof Error ? error.message : String(error)
       this.recordStageMetric(run.id, {
-        stage: role, label: `${agent ? `Agent ${agent.stepId}` : roleLabel(role)} · 第 ${(this.database.getRun(run.id)?.run.reviewAttempt ?? 0) + 1} 轮`,
-        attempt: (this.database.getRun(run.id)?.run.reviewAttempt ?? 0) + 1, status: 'failed', executor: config.executor, model: config.model,
+        stage: role, agentTaskId: agent?.id, agentStepId: agent?.stepId, label: `${agent ? `Agent ${agent.stepId}` : roleLabel(role)} · 第 ${agent?.attempt ?? (this.database.getRun(run.id)?.run.reviewAttempt ?? 0) + 1} 次`,
+        attempt: agent?.attempt ?? (this.database.getRun(run.id)?.run.reviewAttempt ?? 0) + 1, status: 'failed', executor: config.executor, model: config.model,
         startedAt, completedAt: new Date().toISOString(), durationMs: Date.now() - started, inputTokens: 0, outputTokens: 0, costUsd: 0, resourceDetail: `${config.effort} · 执行异常终止`, problem
       })
       throw error
@@ -374,7 +409,7 @@ export class Orchestrator {
     return updated
   }
 
-  private fail(runId: string, error: unknown): void {
+  private async fail(runId: string, error: unknown): Promise<void> {
     const status = this.database.getRun(runId)?.run.status
     if (this.cancelled.has(runId) || this.paused.has(runId) || status === 'paused' || status === 'cancelled') return
     const message = error instanceof Error ? error.message : String(error)
@@ -389,7 +424,9 @@ export class Orchestrator {
       this.emit(runId, 'paused', 'error', '任务已安全暂停。完成对应 CLI 登录后，可从当前检查点恢复。')
       return
     }
-    this.database.updateRun(runId, { status: 'failed', error: message })
+    const failure = await this.recovery.capture(this.requireRun(runId), message)
+    if (this.paused.has(runId) || this.cancelled.has(runId) || ['paused', 'cancelled'].includes(this.requireRun(runId).status)) return
+    this.database.updateRun(runId, { status: 'failed', checkpointPhase: failure.phase, failure, error: message })
     this.emit(runId, 'failed', 'error', message)
   }
 
@@ -410,7 +447,7 @@ export class Orchestrator {
   }
 
   private implementerPrompt(run: RunSummary, contract: ExecutionContract) {
-    return `任务目标：${run.objective}\n\n已批准的执行合同：\n${JSON.stringify(contract, null, 2)}\n\n补充指令：${run.additionalInstructions || '无'}\n现在执行合同。不要把自述当作验证证据，Foreman 会独立运行门禁。`
+    return `任务目标：${run.objective}\n\n已批准的执行合同：\n${JSON.stringify(contract, null, 2)}\n\n补充指令：${run.additionalInstructions || '无'}\n${run.failure ? '这是失败后的接续执行：先检查保留的文件和过程记录，再完成剩余工作；外部操作结果不确定时先核实，不要盲目重复。\n' : ''}现在执行合同。不要把自述当作验证证据，Foreman 会独立运行门禁。`
   }
 
   private reviewerPrompt(run: RunSummary, contract: ExecutionContract, result: ImplementationReport, verification: import('../shared/contracts').VerificationReport, attempt: number, inspection: { stat: string; filesChanged: number; additions: number; deletions: number }) {

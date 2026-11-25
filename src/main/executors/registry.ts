@@ -2,11 +2,12 @@ import type { ExecutorKind } from '../../shared/contracts'
 import type { AgentExecutor } from './types'
 import { ClaudeExecutor } from './claude'
 import { CodexExecutor } from './codex'
+import { ZcodeExecutor } from './zcode'
 
 export class ExecutorRegistry {
   private readonly executors: Map<ExecutorKind, AgentExecutor>
 
-  constructor(executors: AgentExecutor[] = [new CodexExecutor(), new ClaudeExecutor()]) {
+  constructor(executors: AgentExecutor[] = [new CodexExecutor(), new ClaudeExecutor(), new ZcodeExecutor()]) {
     this.executors = new Map(executors.map((executor) => [executor.kind, executor]))
   }
 

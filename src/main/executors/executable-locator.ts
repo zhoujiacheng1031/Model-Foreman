@@ -4,7 +4,7 @@ import { cliSearchDirectories, isWindowsEnvironment } from './cli-environment'
 
 type ExecutableCheck = (path: string) => boolean
 
-export function resolveExecutable(command: 'codex' | 'claude', env: NodeJS.ProcessEnv = process.env, check: ExecutableCheck = isExecutable): string {
+export function resolveExecutable(command: 'codex' | 'claude' | 'zcode', env: NodeJS.ProcessEnv = process.env, check: ExecutableCheck = isExecutable): string {
   const searchEntries = cliSearchDirectories(env)
   const windows = isWindowsEnvironment(env)
   const pathJoin = windows ? win32.join : join

@@ -75,6 +75,6 @@ describe('0.4.0 user feedback regressions', () => {
     expect(app).toContain('一键配置并启动')
     expect(app).toContain('验证连接')
     expect(app).toContain('Gateway Token 环境变量')
-    expect(app).toContain('完整检测目录')
+    expect(app).toContain('<ConnectorsView')
   })
 })
