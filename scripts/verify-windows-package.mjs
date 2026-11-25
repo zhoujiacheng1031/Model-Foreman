@@ -50,7 +50,7 @@ try {
   const verifiedFiles = files(path.join(root, 'out')).sort().map(file => {
     const relative = path.relative(root, file).split(path.sep).join('/')
     const expected = fs.readFileSync(file)
-    const actual = extractFile(archive, relative)
+    const actual = extractFile(archive, path.normalize(relative))
     const sha256 = digest(expected)
     if (actual.length !== expected.length || digest(actual) !== sha256) throw new Error(`Installer payload mismatch: ${relative}`)
     return { file: relative, sizeBytes: actual.length, sha256, status: 'passed' }
